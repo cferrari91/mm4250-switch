@@ -1,51 +1,70 @@
-# mm4250-switch-sweep
+# mm4250-switch
 
-QCoDeS driver for the Menlo Micro MM4250 (SP6T cryogenic RF MEMS switch,
-via its USB HiV Driver Board), plus a 1-port S11 sweep across a chosen
-set of RF channels on a Keysight VNA, saved as Touchstone `.s1p` files
-and recorded to a QCoDeS database.
+A QCoDeS driver for the **Menlo Micro MM4250** — an SP6T cryogenic RF
+MEMS switch, driven over USB HID through its HiV Driver Board — plus the
+measurement code that uses it to sweep S11 across the switch's RF
+channels on a Keysight VNA.
+
+The driver is the point of this repo. The measurement code is what it's
+for.
 
 ## Layout
 
-- `drivers/MM4250_QCodes_driver.py` -- the switch driver. Hardware-only
-  (connects for real in `__init__`, no software-only mode), matching the
-  plain, print()-based style of this framework's other single-file
-  drivers rather than heavier type-hinted/defensive code.
-- `drivers/MM4250_QCodes_driver_commented.py` -- the same driver, heavily
+```
+drivers/        the switch driver (and the VNA drivers it's used with)
+measurements/   1-port S11 measurement and sweep
+docs/           driver usage notes
+```
+
+### `drivers/` — the switch
+
+- **`MM4250_QCodes_driver.py`** — the switch driver. Hardware-only
+  (connects for real in `__init__`, no software-only mode), written in
+  the plain, print()-based style of the lab framework's other
+  single-file drivers rather than heavier type-hinted/defensive code.
+  `switch.channel(1..6)` selects an RF port; `switch.state(...)` reaches
+  the `ALL_OPEN` / `INTERNAL_SHORT` / `INTERNAL_LOAD` calibration
+  standards.
+- **`MM4250_QCodes_driver_commented.py`** — the same driver, heavily
   commented, meant to be read top to bottom as a tutorial on both this
   switch and QCoDeS driver-writing in general.
-- `drivers/KeysightVNA_driver.py` + `drivers/N52xx.py` -- the Keysight
-  P5004B VNA driver (`KeysightVNA_driver.py` is a thin subclass of the
-  base PNA driver in `N52xx.py`). Needed by the sweep code; not written
-  as part of this project.
-- `vna_measure.py` -- the measurement itself, meant to be typed
-  into a notebook: `setup_sweep` (set frequency range/points/IF
-  bandwidth/power/averaging), `sweep_settings` (print what's currently
-  set), `ensure_trace`, `measure_sparam` (trigger one sweep, read an
-  S-parameter back as complex data), and `measure_s11`. Saves nothing --
+
+### `drivers/` — the VNA (third-party)
+
+- `N52xx.py` and `KeysightVNA_driver.py` — the Keysight P5004B driver,
+  vendored from [QCoDeS](https://github.com/microsoft/Qcodes) under its
+  MIT license. Not original to this project; see
+  [`drivers/THIRD_PARTY.md`](drivers/THIRD_PARTY.md).
+
+### `measurements/`
+
+- **`vna_measure.py`** — the measurement itself, meant to be typed into
+  a notebook: `setup_sweep` (frequency range, points, IF bandwidth,
+  power, averaging), `sweep_settings` (print what's currently set),
+  `ensure_trace`, `measure_sparam` (trigger one sweep, read an
+  S-parameter back as complex data), and `measure_s11`. Saves nothing —
   it returns numpy arrays. 1-port for now; `measure_sparam` is already
   S-parameter agnostic, so 2-port slots in on top of it.
-- `oneport_db_sweep.py` -- the data layer on top of
-  `vna_measure`: `save_s1p` (write Touchstone), `record_channel` (save
-  one measurement as a QCoDeS run), and `run_oneport_sweep` (measure +
-  save + record over a list of channels).
-- `oneport_db_sweep.ipynb` -- runnable notebook for the above: connects
-  to the VNA and switch, sweeps the channels listed in `channels`, and
-  saves each to `Sweeps/<date>_<temp>/<switch_serials>/raw/RF<n>.s1p`
-  plus a run in `mm4250_oneport.db`.
-- `LAB_SETUP.md` -- how to copy this onto the lab measurement computer
-  and run it from `users/<name>/`.
-- `docs/MM4250_Instructions.md` -- driver usage notes and status.
+- **`oneport_db_sweep.py`** — the data layer on top of it: `save_s1p`
+  (write Touchstone), `record_channel` (save one measurement as a
+  QCoDeS run), and `run_oneport_sweep` (measure + save + record over a
+  list of channels).
+- **`oneport_db_sweep.ipynb`** — runnable notebook: connects to the VNA
+  and switch, sweeps the channels you list, saves each to
+  `Sweeps/<date>_<temp>/<switch_serials>/raw/RF<n>.s1p` plus a run in
+  `mm4250_oneport.db`.
+- **`LAB_SETUP.md`** — how to copy this onto the lab measurement
+  computer and run it from `users/<name>/`.
 
 ## Taking a measurement by hand
 
 Once a notebook has connected the VNA as `ksvna` (and optionally the
-switch as `switch`) -- which `QCodesMeasurmentFramework.ipynb` already
-does -- point Python at this folder and import:
+switch as `switch`) — which the lab's `QCodesMeasurmentFramework.ipynb`
+already does — point Python at `measurements/` and import:
 
 ```python
 import sys
-sys.path.insert(0, r"<path to the folder holding these files>")
+sys.path.insert(0, r"<path to>/mm4250-switch/measurements")
 from vna_measure import setup_sweep, sweep_settings, measure_s11
 from oneport_db_sweep import run_oneport_sweep
 ```
@@ -64,25 +83,23 @@ whatever it's already set to. Every function takes optional `vna=` /
 `switch=` arguments if your instruments were registered under other
 names.
 
-Note that changing the frequency range, point count or IF bandwidth
-invalidates whatever calibration is applied on the VNA -- re-run the cal
-after changing them.
+Changing the frequency range, point count or IF bandwidth invalidates
+whatever calibration is applied on the VNA — re-run the cal after
+changing them.
 
-## Before running a batch sweep
+## Running a batch sweep
 
 - Edit `channels`/`date_str`/`temp_str`/`switch_serials` in
-  `oneport_db_sweep.ipynb` to match the run. `channels` is any subset of
-  1-6 (e.g. `[1, 3, 5]`), or `list(range(1, 7))` for all of them.
-- Sweeps are saved under `Sweeps/<date>_<temp>/<switch_serials>/raw/`
-  beside the code, and the database sits next to it. Both resolve from
-  the module's own folder rather than the working directory, so copying
-  these files somewhere else (the lab machine's `users/<name>/`, say)
-  puts the outputs in that folder too. Override with `out_root=` /
-  `db_path=`.
-- Every run accumulates into one shared database file,
-  `mm4250_oneport.db` at this repo's root (override with `db_path=`).
-  Each `run_oneport_sweep(...)` call is its own QCoDeS *experiment*,
-  named `<date_str>_<temp_str>_<switch_serials>` with
+  `measurements/oneport_db_sweep.ipynb`. `channels` is any subset of 1-6
+  (e.g. `[1, 3, 5]`), or `list(range(1, 7))` for all of them.
+- Outputs land beside the code — `measurements/Sweeps/...` and
+  `measurements/mm4250_oneport.db`. Both resolve from the module's own
+  folder rather than the working directory, so copying these files
+  somewhere else (the lab machine's `users/<name>/`, say) puts the
+  outputs in that folder too. Override with `out_root=` / `db_path=`.
+- Every run accumulates into that one database file. Each
+  `run_oneport_sweep(...)` call is its own QCoDeS *experiment*, named
+  `<date_str>_<temp_str>_<switch_serials>` with
   `sample_name=switch_serials`; each channel measured in that call is
   one *run* named `RF<n>` inside it. Re-running the same
   date/temp/serials adds to that experiment rather than duplicating it.
@@ -93,19 +110,23 @@ after changing them.
   `plottr-inspectr --db mm4250_oneport.db`, or load runs in Python with
   `qcodes.dataset`'s `load_by_id`/`load_by_run_spec`.
 
-No calibration or de-embedding is applied -- this is raw acquisition
+No calibration or de-embedding is applied — this is raw acquisition
 only.
 
 ## Running from the lab's measurement framework
 
-`run_oneport_sweep` takes optional `vna=`/`switch=` arguments. If you
-leave them out, it looks up whatever QCoDeS instruments are registered
-under the names `ksvna` and `switch` in the current kernel -- which is
-what `QCodesMeasurmentFramework.ipynb` creates. So the same function
-works either standalone (the notebook here connects its own instruments)
-or from the framework notebook's kernel, where they already exist. Don't
-do both in one kernel: two live `MM4250("switch")` instances collide on
-the instrument name.
+`run_oneport_sweep` and the `vna_measure` functions take optional
+`vna=`/`switch=` arguments. Leave them out and they look up whatever
+QCoDeS instruments are registered under the names `ksvna` and `switch`
+in the current kernel — which is what `QCodesMeasurmentFramework.ipynb`
+creates. So the same functions work either standalone (the notebook here
+connects its own instruments) or from the framework notebook's kernel.
+
+Don't do both in one kernel: the MM4250 opens an exclusive USB handle,
+so a second `MM4250("switch")` will fail to connect.
+
+See [`measurements/LAB_SETUP.md`](measurements/LAB_SETUP.md) for the
+full walkthrough.
 
 ## Dependencies
 
@@ -121,11 +142,17 @@ the instrument name.
   `0xEDFB`)
 - Keysight P5004B VNA (9 kHz-20 GHz, 2-port)
 
+## License
+
+MIT — see [`LICENSE`](LICENSE). The vendored QCoDeS VNA drivers in
+`drivers/` carry their own MIT license; see
+[`drivers/THIRD_PARTY.md`](drivers/THIRD_PARTY.md).
+
 ## Archive
 
-Earlier work not part of this 1-port sweep -- the 2-port S-parameter
-sweep (`sparam_sweep.py`, `switch_matrix_sweep.ipynb`) and the
-SOL de-embedding pipeline (`deembed.py`, `oneport_deembed_sweep.ipynb`,
-and the `oneport_sweep.py` module they shared) -- was moved to
-`../Archive/mm4250-switch-sweep-prior/`. It is also still in this repo's
-git history up to commit `5e64ff9`.
+Earlier work not part of this 1-port sweep — the 2-port S-parameter
+sweep (`sparam_sweep.py`, `switch_matrix_sweep.ipynb`) and the SOL
+de-embedding pipeline (`deembed.py`, `oneport_deembed_sweep.ipynb`, and
+the `oneport_sweep.py` module they shared) — was moved to
+`../Archive/mm4250-switch-sweep-prior/`. The 2-port work is also still
+in this repo's git history at commit `51c66ff`.

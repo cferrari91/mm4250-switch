@@ -1,3 +1,15 @@
+"""
+Keysight P5004B VNA driver.
+
+Vendored from QCoDeS (qcodes/instrument_drivers/Keysight/Keysight_P5004B.py),
+unmodified apart from the filename, and redistributed under QCoDeS' MIT
+license. Copyright (c) 2015-2023 by Microsoft Corporation and Københavns
+Universitet. See drivers/THIRD_PARTY.md for the full license text.
+
+Not original to this project -- the switch driver is
+MM4250_QCodes_driver.py.
+"""
+
 from typing import TYPE_CHECKING
 
 from . import N52xx

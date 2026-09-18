@@ -9,9 +9,9 @@ Each channel is saved twice:
     Sweeps/<date_str>_<temp_str>/<switch_serials>/raw/RF<n>.s1p
     a QCoDeS run named "RF<n>" in a shared .db file
 
-Database layout: ONE accumulating .db file (mm4250_oneport.db at this
-repo's root, see DEFAULT_DB_NAME) holds every run ever taken, the way the
-lab's nanoRFE_data.db / tinySA_plottr.db files are used. Inside it:
+Database layout: ONE accumulating .db file (mm4250_oneport.db, beside
+these files -- see DEFAULT_DB_NAME) holds every run ever taken, the way
+the lab's nanoRFE_data.db / tinySA_plottr.db files are used. Inside it:
 
     experiment  -- one per run_oneport_sweep() call, named
                    "<date_str>_<temp_str>_<switch_serials>", with

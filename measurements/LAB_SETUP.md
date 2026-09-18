@@ -11,11 +11,13 @@ Written for the DAQ machine as it is today: Windows, code under
 
 ## 1. Copy these three files
 
+All three live in this repo's `measurements/` folder:
+
 | File | What it is |
 |---|---|
-| `vna_measure.py` | the measurement -- `setup_sweep`, `measure_s11` |
-| `oneport_db_sweep.py` | saving -- `.s1p` files and the QCoDeS database |
-| `oneport_db_sweep.ipynb` | the notebook you run |
+| `measurements/vna_measure.py` | the measurement -- `setup_sweep`, `measure_s11` |
+| `measurements/oneport_db_sweep.py` | saving -- `.s1p` files and the QCoDeS database |
+| `measurements/oneport_db_sweep.ipynb` | the notebook you run |
 
 into
 

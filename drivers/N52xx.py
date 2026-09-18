@@ -1,3 +1,15 @@
+"""
+Keysight PNA/N52xx base driver.
+
+Vendored from QCoDeS (qcodes/instrument_drivers/Keysight/N52xx.py) with
+local modifications, and redistributed under QCoDeS' MIT license.
+Copyright (c) 2015-2023 by Microsoft Corporation and Københavns
+Universitet. See drivers/THIRD_PARTY.md for the full license text.
+
+Not original to this project -- the switch driver is
+MM4250_QCodes_driver.py.
+"""
+
 import re
 import time
 from typing import TYPE_CHECKING, Any
