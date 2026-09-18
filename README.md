@@ -8,6 +8,16 @@ channels on a Keysight VNA.
 The driver is the point of this repo. The measurement code is what it's
 for.
 
+> **Status: active development.** This is an in-progress senior design
+> project by Charlie Ferrari (Colorado School of Mines), built for the
+> QTSF lab. It's public so the work can be read and reused, not because
+> it's finished — interfaces, layout and file names may still change,
+> and the hardware paths are exercised against one specific VNA and
+> switch. Treat it as a working lab tool rather than a released package.
+>
+> Known gaps: 1-port only (2-port is planned), and no calibration or
+> de-embedding is applied to the measurements.
+
 ## Layout
 
 ```
