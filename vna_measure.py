@@ -12,7 +12,7 @@ and that's the whole measurement. Pass vna=/switch= explicitly if your
 instruments were registered under different names.
 
 Nothing here saves anything -- these return numpy arrays and print what
-they did. See scripts/oneport_db_sweep.py for the batch sweep that saves
+they did. See oneport_db_sweep.py for the batch sweep that saves
 .s1p files and records QCoDeS runs.
 
 1-port only for now. The trace/sweep helpers are already S-parameter

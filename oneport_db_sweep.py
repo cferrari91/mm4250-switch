@@ -1,7 +1,7 @@
 """
 Batch 1-port sweep: measure a set of RF channels and save the results.
 
-Measurement itself comes from scripts/vna_measure.py -- this module is
+Measurement itself comes from vna_measure.py -- this module is
 the data layer on top of it. For interactive one-off measurements, use
 vna_measure directly.
 
@@ -40,7 +40,7 @@ from qcodes.dataset import (
     load_or_create_experiment,
 )
 
-from scripts.vna_measure import (
+from vna_measure import (
     DEFAULT_SWITCH_NAME,
     DEFAULT_VNA_NAME,
     _resolve_instrument,
@@ -48,16 +48,33 @@ from scripts.vna_measure import (
 )
 
 DEFAULT_DB_NAME = "mm4250_oneport.db"
+DEFAULT_OUT_DIR_NAME = "Sweeps"
+
+
+def _default_out_root():
+    """
+    Where sweeps are saved by default: <repo root>/Sweeps.
+
+    Resolved from this file's location, NOT the working directory --
+    otherwise running from a notebook that lives somewhere else (the
+    lab's QCodesMeasurmentFramework.ipynb, say) would scatter sweep data
+    into whatever folder that notebook happens to sit in.
+
+    So copying these files into a folder of your own -- e.g. the lab
+    machine's users/<name>/ -- puts the sweeps in that folder too.
+    """
+    return Path(__file__).resolve().parent / DEFAULT_OUT_DIR_NAME
 
 
 def _default_db_path():
     """
-    Path to the shared database: <repo root>/mm4250_oneport.db.
+    Path to the shared database: mm4250_oneport.db, in the same folder
+    as these files.
 
     Resolved from this file's location rather than the working directory,
-    so a notebook and a script both end up writing to the same one file.
+    so every notebook that calls this writes to the same one file.
     """
-    return Path(__file__).resolve().parent.parent / DEFAULT_DB_NAME
+    return Path(__file__).resolve().parent / DEFAULT_DB_NAME
 
 
 def save_s1p(freq_hz, s11, path):
@@ -68,7 +85,7 @@ def save_s1p(freq_hz, s11, path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
-        f.write("!Created by scripts/oneport_db_sweep.py\n")
+        f.write("!Created by oneport_db_sweep.py\n")
         f.write("# HZ S RI R 50\n")
         for i in range(len(freq_hz)):
             f.write(f"{freq_hz[i]:.1f} {s11[i].real:.6e} {s11[i].imag:.6e}\n")
@@ -101,7 +118,7 @@ def record_channel(channel, freq_hz, s11, exp, s1p_path=None, **metadata):
     return run_id
 
 
-def run_oneport_sweep(channels, date_str, temp_str, switch_serials, out_root="Sweeps",
+def run_oneport_sweep(channels, date_str, temp_str, switch_serials, out_root=None,
                       db_path=None, exp_name=None, vna=None, switch=None):
     """
     Sweep the RF channels in `channels` (any subset of 1-6, e.g. [1, 3, 5]
@@ -109,6 +126,11 @@ def run_oneport_sweep(channels, date_str, temp_str, switch_serials, out_root="Sw
 
       - <out_root>/<date_str>_<temp_str>/<switch_serials>/raw/RF<n>.s1p
       - a QCoDeS run named "RF<n>" in the shared database
+
+    `out_root` defaults to a Sweeps/ folder beside this file -- not
+    beside whatever notebook called it -- so sweeps land in the same
+    place no matter where you run from. Pass it explicitly (absolute, or
+    relative to the working directory) to put them somewhere else.
 
     All of this call's runs go into one experiment named
     "<date_str>_<temp_str>_<switch_serials>" (override with `exp_name`),
@@ -135,7 +157,8 @@ def run_oneport_sweep(channels, date_str, temp_str, switch_serials, out_root="Sw
     print(f"Recording to {db_path}")
     print(f"  experiment {exp_name!r} (sample {switch_serials!r})")
 
-    sweep_dir = Path(out_root) / f"{date_str}_{temp_str}" / switch_serials
+    out_root = Path(out_root) if out_root is not None else _default_out_root()
+    sweep_dir = out_root / f"{date_str}_{temp_str}" / switch_serials
     raw_dir = sweep_dir / "raw"
 
     for channel in channels:

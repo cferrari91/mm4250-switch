@@ -18,14 +18,14 @@ and recorded to a QCoDeS database.
   P5004B VNA driver (`KeysightVNA_driver.py` is a thin subclass of the
   base PNA driver in `N52xx.py`). Needed by the sweep code; not written
   as part of this project.
-- `scripts/vna_measure.py` -- the measurement itself, meant to be typed
+- `vna_measure.py` -- the measurement itself, meant to be typed
   into a notebook: `setup_sweep` (set frequency range/points/IF
   bandwidth/power/averaging), `sweep_settings` (print what's currently
   set), `ensure_trace`, `measure_sparam` (trigger one sweep, read an
   S-parameter back as complex data), and `measure_s11`. Saves nothing --
   it returns numpy arrays. 1-port for now; `measure_sparam` is already
   S-parameter agnostic, so 2-port slots in on top of it.
-- `scripts/oneport_db_sweep.py` -- the data layer on top of
+- `oneport_db_sweep.py` -- the data layer on top of
   `vna_measure`: `save_s1p` (write Touchstone), `record_channel` (save
   one measurement as a QCoDeS run), and `run_oneport_sweep` (measure +
   save + record over a list of channels).
@@ -33,6 +33,8 @@ and recorded to a QCoDeS database.
   to the VNA and switch, sweeps the channels listed in `channels`, and
   saves each to `Sweeps/<date>_<temp>/<switch_serials>/raw/RF<n>.s1p`
   plus a run in `mm4250_oneport.db`.
+- `LAB_SETUP.md` -- how to copy this onto the lab measurement computer
+  and run it from `users/<name>/`.
 - `docs/MM4250_Instructions.md` -- driver usage notes and status.
 
 ## Taking a measurement by hand
@@ -43,8 +45,9 @@ does -- point Python at this folder and import:
 
 ```python
 import sys
-sys.path.insert(0, r"<path to>/mm4250-switch-sweep")
-from scripts.vna_measure import setup_sweep, sweep_settings, measure_s11
+sys.path.insert(0, r"<path to the folder holding these files>")
+from vna_measure import setup_sweep, sweep_settings, measure_s11
+from oneport_db_sweep import run_oneport_sweep
 ```
 
 Then the whole measurement is two lines:
@@ -70,6 +73,12 @@ after changing them.
 - Edit `channels`/`date_str`/`temp_str`/`switch_serials` in
   `oneport_db_sweep.ipynb` to match the run. `channels` is any subset of
   1-6 (e.g. `[1, 3, 5]`), or `list(range(1, 7))` for all of them.
+- Sweeps are saved under `Sweeps/<date>_<temp>/<switch_serials>/raw/`
+  beside the code, and the database sits next to it. Both resolve from
+  the module's own folder rather than the working directory, so copying
+  these files somewhere else (the lab machine's `users/<name>/`, say)
+  puts the outputs in that folder too. Override with `out_root=` /
+  `db_path=`.
 - Every run accumulates into one shared database file,
   `mm4250_oneport.db` at this repo's root (override with `db_path=`).
   Each `run_oneport_sweep(...)` call is its own QCoDeS *experiment*,
