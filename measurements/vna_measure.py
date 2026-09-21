@@ -12,18 +12,23 @@ and that's the whole measurement. Pass vna=/switch= explicitly if your
 instruments were registered under different names.
 
 Nothing here saves anything -- these return numpy arrays and print what
-they did. See oneport_db_sweep.py for the batch sweep that saves
-.s1p files and records QCoDeS runs.
+they did. See sweep_db.py for the batch sweeps that save Touchstone
+files and record QCoDeS runs.
 
-1-port only for now. The trace/sweep helpers are already S-parameter
-agnostic (measure_sparam takes "S11", "S21", ... ), so the 2-port version
-is a short addition on top of them.
+Both 1-port and 2-port live here, on one shared core: ensure_traces /
+measure_sparams take a list of S-parameters and read them all back from a
+single sweep. measure_s11 and measure_2port are thin wrappers on that.
 """
 
 from qcodes.instrument import Instrument
 
 DEFAULT_VNA_NAME = "ksvna"
 DEFAULT_SWITCH_NAME = "switch"
+
+# The four S-parameters of a full 2-port measurement, in the order a
+# person reads them. NOT the order they go into a .s2p file -- Touchstone
+# wants S11, S21, S12, S22. See save_touchstone() in sweep_db.py.
+SPARAMS_2PORT = ("S11", "S12", "S21", "S22")
 
 
 def _resolve_instrument(instrument, default_name, label):
@@ -113,20 +118,70 @@ def setup_sweep(start=None, stop=None, points=None, if_bandwidth=None,
     return sweep_settings(vna=vna)
 
 
-def ensure_trace(sparam="S11", vna=None):
+def ensure_traces(sparams, vna=None):
     """
-    Make sure a trace measuring `sparam` (e.g. "S11", "S21") exists on
-    the VNA, reusing it if it's already there rather than adding a
-    duplicate. Returns the trace object.
+    Make sure a trace exists on the VNA for each S-parameter in
+    `sparams` (e.g. ("S11", "S21")), reusing whichever are already
+    configured rather than adding duplicates. Returns the trace objects
+    in the same order as `sparams`.
     """
     vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
 
-    for tr in vna.traces:
-        if tr.trace() == sparam:
-            return tr
-    tr = vna.add_trace()
-    tr.trace(sparam)
-    return tr
+    # vna.traces re-queries the instrument every time it's read, so take
+    # the catalog once up front rather than once per S-parameter.
+    existing = {tr.trace(): tr for tr in vna.traces}
+
+    traces = []
+    for sparam in sparams:
+        tr = existing.get(sparam)
+        if tr is None:
+            tr = vna.add_trace()
+            tr.trace(sparam)
+            existing[sparam] = tr
+        traces.append(tr)
+    return traces
+
+
+def ensure_trace(sparam="S11", vna=None):
+    """
+    Make sure a single trace measuring `sparam` exists, and return it.
+    One-parameter form of ensure_traces.
+    """
+    return ensure_traces((sparam,), vna=vna)[0]
+
+
+def measure_sparams(sparams=SPARAMS_2PORT, vna=None):
+    """
+    Trigger ONE sweep and read back every S-parameter in `sparams` from
+    it. Returns (freq_hz, data), where data maps each S-parameter name to
+    a complex numpy array:
+
+        freq, data = measure_sparams(("S11", "S21"))
+        data["S21"]        # complex ndarray
+
+    One trigger covers all of them -- run_sweep() runs every trace on the
+    VNA's channel, and the P5004B takes care of the reverse sweep needed
+    for S12/S22 on its own. This is the generic read that measure_s11 and
+    measure_2port are both built on.
+    """
+    vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
+
+    traces = ensure_traces(sparams, vna=vna)
+    traces[0].run_sweep()
+
+    # Reading .polar() would otherwise re-trigger its own sweep
+    # (auto_sweep defaults to True); we already swept above, so turn that
+    # off for the reads below -- otherwise each S-parameter would come
+    # from a different sweep.
+    prev_auto_sweep = vna.auto_sweep()
+    vna.auto_sweep(False)
+    try:
+        data = {sparam: tr.polar() for sparam, tr in zip(sparams, traces)}
+    finally:
+        vna.auto_sweep(prev_auto_sweep)
+
+    freq_hz = vna.frequency_axis()
+    return freq_hz, data
 
 
 def measure_sparam(sparam="S11", vna=None):
@@ -134,47 +189,83 @@ def measure_sparam(sparam="S11", vna=None):
     Trigger one sweep and read `sparam` back as complex data.
     Returns (freq_hz, values) as (np.ndarray, np.ndarray[complex]).
 
-    This is the generic single-parameter read -- measure_s11 is a thin
-    wrapper on it, and the 2-port version will be too.
+    One-parameter form of measure_sparams.
     """
-    vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
-
-    tr = ensure_trace(sparam, vna=vna)
-    tr.run_sweep()
-
-    # Reading .polar() would otherwise re-trigger its own sweep
-    # (auto_sweep defaults to True); we already swept above, so turn that
-    # off for the read below.
-    prev_auto_sweep = vna.auto_sweep()
-    vna.auto_sweep(False)
-    try:
-        values = tr.polar()
-    finally:
-        vna.auto_sweep(prev_auto_sweep)
-
-    freq_hz = vna.frequency_axis()
-    return freq_hz, values
+    freq_hz, data = measure_sparams((sparam,), vna=vna)
+    return freq_hz, data[sparam]
 
 
-def measure_s11(channel=None, vna=None, switch=None):
+def _select(channel=None, state=None, switch=None):
+    """
+    Put the switch where the caller asked, if they asked at all.
+
+    `channel` (1-6) selects an RF channel; `state` names any switch
+    position directly ("ALL_OPEN", "INTERNAL_SHORT", "RFC_RF4", ...).
+    Pass neither to measure whatever the switch is already set to, or if
+    there's no switch in the setup at all. Returns a short label for the
+    position, or None if nothing was changed.
+    """
+    if channel is not None and state is not None:
+        raise ValueError("pass channel= or state=, not both")
+    if channel is None and state is None:
+        return None
+
+    switch = _resolve_instrument(switch, DEFAULT_SWITCH_NAME, "switch")
+    if channel is not None:
+        switch.channel(channel)
+        label = f"RF{channel}"
+    else:
+        switch.state(state)
+        label = state
+    print(f"Switch set to {label}")
+    return label
+
+
+def measure_s11(channel=None, state=None, vna=None, switch=None):
     """
     Take a 1-port S11 measurement and return (freq_hz, s11).
 
     If `channel` is given (1-6), the MM4250 switch is set to that RF
-    channel first; leave it out to measure whatever the switch is
-    already set to, or if there's no switch in the setup at all.
+    channel first; `state` sets any switch position by name instead.
+    Leave both out to measure whatever the switch is already set to, or
+    if there's no switch in the setup at all.
 
-        freq, s11 = measure_s11()      # measure as-is
-        freq, s11 = measure_s11(3)     # switch to RF3, then measure
+        freq, s11 = measure_s11()                      # measure as-is
+        freq, s11 = measure_s11(3)                     # switch to RF3, then measure
+        freq, s11 = measure_s11(state="INTERNAL_LOAD") # a built-in standard
     """
     vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
 
-    if channel is not None:
-        switch = _resolve_instrument(switch, DEFAULT_SWITCH_NAME, "switch")
-        switch.channel(channel)
-        print(f"Switch set to RF{channel}")
+    _select(channel, state, switch)
 
     freq_hz, s11 = measure_sparam("S11", vna=vna)
     print(f"Measured S11: {len(freq_hz)} points, "
           f"{freq_hz[0] / 1e9:.6g} - {freq_hz[-1] / 1e9:.6g} GHz")
     return freq_hz, s11
+
+
+def measure_2port(channel=None, state=None, vna=None, switch=None):
+    """
+    Take a full 2-port measurement and return (freq_hz, data), where
+    data is {"S11": ..., "S12": ..., "S21": ..., "S22": ...} of complex
+    numpy arrays -- all four read from a single sweep.
+
+    `channel`/`state` work exactly as in measure_s11: set the switch
+    first, or leave both out and measure it where it stands.
+
+        freq, data = measure_2port()             # measure as-is
+        freq, data = measure_2port(3)            # switch to RF3, then measure
+        freq, data = measure_2port(state="ALL_OPEN")
+
+    What the numbers mean depends entirely on how the VNA is cabled --
+    these are raw S-parameters at the VNA's own port reference planes,
+    with no calibration or de-embedding applied.
+    """
+    vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
+
+    _select(channel, state, switch)
+
+    freq_hz, data = measure_sparams(SPARAMS_2PORT, vna=vna)
+    print(f"Measured {', '.join(SPARAMS_2PORT)}: {len(freq_hz)} points, "
+          f"{freq_hz[0] / 1e9:.6g} - {freq_hz[-1] / 1e9:.6g} GHz")
+    return freq_hz, data
