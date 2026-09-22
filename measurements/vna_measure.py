@@ -53,6 +53,16 @@ DEFAULT_SWITCH_NAME = "switch"
 # passed by accident.
 MAX_POWER_DBM = 0.0
 
+# Slack allowed when reading power back off the instrument, in dB.
+#
+# Setting and reading are not symmetric: the driver writes power with
+# "SOUR:POW {:.2f}" and the source has finite resolution, so asking for
+# exactly MAX_POWER_DBM can read back a hair above it. Without slack the
+# pre-sweep check would then refuse the very setting setup_sweep() had
+# just accepted. Far too small to matter for safety -- the nearest real
+# limit is 4 dB away.
+POWER_READBACK_SLACK_DB = 0.05
+
 # The four S-parameters of a full 2-port measurement, in the order a
 # person reads them. NOT the order they go into a .s2p file -- Touchstone
 # wants S11, S21, S12, S22. See save_touchstone() in sweep_db.py.
@@ -193,6 +203,18 @@ TRACE_STATE_QUERIES = {
 }
 
 
+# Queries this instrument has already refused once, so they aren't asked
+# again. An unsupported SCPI query doesn't fail fast -- it burns a full
+# VISA timeout, and TRACE_STATE_QUERIES is asked once per trace, so on a
+# 2-port sweep that would be four timeouts per query per position. Ask
+# each one once per session and remember the answer.
+#
+# A one-off timeout on a query the box does support will also land it
+# here and cost you that metadata key for the rest of the session. That's
+# the right trade for provenance data; clear this set to retry.
+_UNSUPPORTED_QUERIES = set()
+
+
 def _try_ask(instrument, query):
     """
     Ask `query` and return the reply as a number where it parses as one,
@@ -204,9 +226,12 @@ def _try_ask(instrument, query):
     measurement -- hence the broad except. record_measurement drops None
     values, so an unanswered query simply doesn't appear on the run.
     """
+    if query in _UNSUPPORTED_QUERIES:
+        return None
     try:
         reply = instrument.ask(query).strip().strip('"')
     except Exception:
+        _UNSUPPORTED_QUERIES.add(query)
         return None
     try:
         value = float(reply)
@@ -356,7 +381,7 @@ def _check_ready(vna):
     panel afterwards.
     """
     power = vna.power()
-    if power > MAX_POWER_DBM:
+    if power > MAX_POWER_DBM + POWER_READBACK_SLACK_DB:
         raise RuntimeError(
             f"VNA source power is {power:g} dBm, above the "
             f"{MAX_POWER_DBM:g} dBm ceiling. Set it with setup_sweep(power=...), "

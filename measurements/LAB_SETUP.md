@@ -159,6 +159,76 @@ never uses `visa_handle`. Comment out that line and the
 
 ---
 
+## Limits the code enforces
+
+Two hardware limits are checked rather than left to memory. Both protect
+against failures that produce no error of their own.
+
+**Source power is capped at 0 dBm.** `setup_sweep(power=...)` refuses
+anything higher, and the pre-sweep check refuses to measure if the
+instrument is above it -- which catches a power raised at the front panel
+rather than in the notebook.
+
+0 dBm is where the P5004B's specified maximum output bottoms out across
+its range (+10 dBm from 10 MHz to 6.5 GHz, but only +4 dBm from 16-20 GHz
+and 0 dBm below 100 kHz), so it is the most the instrument delivers
+levelled at every frequency it covers. It also sits 7 dB under receiver
+compression at the top of a 1-10 GHz sweep, 27 dB under the +27 dBm
+damage level, and 4 dB under the MM4250's 0.5 V hot-switching limit.
+
+The notebooks run -20 dBm. That is the working default; 0 dBm is a
+ceiling, not a target. **If you need more dynamic range -- and you will,
+measuring 40 dB of switch isolation -- lower `if_bandwidth` before you
+raise power.** 1 kHz to 100 Hz buys about 10 dB for ten times the sweep
+time. Power is the capped lever; IF bandwidth and averaging are not.
+
+To go above the ceiling deliberately:
+
+```python
+import vna_measure
+vna_measure.MAX_POWER_DBM = 5.0
+```
+
+**The source is switched off while the switch moves.** The MM4250 is an
+ohmic MEMS switch, and moving its contacts with RF flowing erodes and
+slowly welds them -- "hot switching", which collapses the rated 1.1e9
+cycles rather than failing the part outright, with nothing about the
+measurement looking wrong meanwhile. `_select()` drops the output for the
+move and restores it afterwards, so you will see
+
+```
+Switch set to RF3 (source off during the move)
+```
+
+That protection lives in `_select()`. Driving the switch by hand --
+`switch.channel(3)` in a cell of your own -- goes straight past it. Turn
+the source off yourself first, or go through `measure_s11` /
+`measure_2port`.
+
+---
+
+## If it refuses to measure
+
+The code stops rather than record data that looks valid and isn't. Each
+message names the fix.
+
+| Message | What happened |
+|---|---|
+| `Refusing to set 20 dBm: the ceiling is 0 dBm` | The typo guard. `power=-20` and `power=20` are one character apart and 10,000x apart in watts |
+| `VNA source power is 10 dBm, above the 0 dBm ceiling` | Same ceiling, caught at sweep time -- so the power was raised at the front panel |
+| `VNA trigger source is 'MAN'` | The sweep would wait forever. Re-run `setup_sweep()` |
+| `VNA RF output is off` | The sweep would record the noise floor into a valid-looking file |
+| `VNA sweep type is 'SEGM'` | The frequency axis is computed from start/stop/points, so only LIN and LOG can be reconstructed. `ksvna.sweep_type('LIN')` |
+| `Expected exactly one new trace on the VNA, found 0` | The PNA wouldn't add a trace. Usually it is at its trace limit -- clear unused traces at the front panel |
+| `[WARNING] VNA fixturing/de-embedding is ON` | A warning, not a stop. It is applied before the data is read, so it lands in the files -- and if you also de-embed in post, you de-embed twice |
+
+**The first measurement of a session may pause a few seconds.** Each run
+records a snapshot of the VNA's state, and any of those SCPI queries this
+firmware doesn't implement costs one VISA timeout. Each is asked once per
+session and then remembered, so only the first position is slow.
+
+---
+
 ## Other things worth knowing
 
 **Connecting resets the switch.** `MM4250.__init__` forces `ALL_OPEN` as
@@ -168,7 +238,24 @@ your channel afterwards.
 **Calibration is not applied.** These are raw measurements. Calibrate the
 VNA before sweeping, and note that changing frequency range, point count
 or IF bandwidth invalidates the cal -- redo it after `setup_sweep`
-changes any of those.
+changes any of those. The receiver attenuator counts too: the datasheet
+requires adding input attenuation switching uncertainty if it changes
+after a user calibration.
+
+**What the data is.** The corrected, unformatted S-parameters (SDATA),
+not the formatted trace (FDATA) the driver's `.polar()` returns. That
+keeps electrical delay, phase offset, smoothing and trace math out of the
+saved files -- any of which someone could set on the front panel while
+looking at a trace, and none of which a Touchstone file would record.
+Port extensions and on-instrument fixturing are upstream of SDATA and do
+reach the data, which is why the code warns when either is on.
+
+**Every run records what the numbers mean.** Alongside the S-parameters,
+each QCoDeS run carries a `vna_*` metadata snapshot -- power, IF
+bandwidth, averages, whether a cal was on, port extensions, and per-trace
+electrical delay, phase offset and smoothing. Read it back with
+`load_by_id(<run>).metadata`. A Touchstone file on its own records none
+of this.
 
 **Updating later.** These are plain copies, not a git clone. If you
 change the code in the `mm4250-switch` repo, re-copy the changed file(s)
