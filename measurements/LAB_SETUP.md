@@ -50,7 +50,9 @@ Open `twoport_sweep.ipynb` from that folder in Jupyter, with
    and imports the two modules from beside the notebook. Prints both
    paths so you can check them.
 2. **Connect** -- creates `ksvna` and `switch`.
-3. **Setup** -- `setup_sweep(start=..., stop=..., points=...)`.
+3. **Setup** -- `setup_sweep(start=..., stop=..., points=...)`. Also
+   puts the VNA in a state where a sweep can finish: trigger source
+   `IMM`, RF output on.
 4. **Single measurement** -- `measure_2port(3)`, nothing saved.
 5. **Batch sweep** -- edit `positions`/`date_str`/`temp_str`/
    `switch_serials`, then save the whole set.
@@ -70,7 +72,7 @@ users\Charlie Ferrari\
     sweep_db.py
     twoport_sweep.ipynb
     oneport_sweep.ipynb
-    Sweeps\<date>_<temp>\<serials>\raw\RF<n>.s2p     <- created by the sweep
+    Sweeps\<date>_<temp>\<serials>\raw\RF<n>_run<id>.s2p   <- created by the sweep
     mm4250_sweeps.db                                 <- created by the sweep
 ```
 

@@ -63,7 +63,7 @@ docs/           driver usage notes
   the 1- and 2-port wrappers.
 - **`twoport_sweep.ipynb`** — runnable notebook: connects to the VNA and
   switch, measures S11/S12/S21/S22 at each position you list, and saves
-  each to `Sweeps/<date>_<temp>/<switch_serials>/raw/<position>.s2p` plus
+  each to `Sweeps/<date>_<temp>/<switch_serials>/raw/<position>_run<id>.s2p` plus
   a run in `mm4250_sweeps.db`.
 - **`oneport_sweep.ipynb`** — the same, for S11 only, saved as `.s1p`.
 - **`LAB_SETUP.md`** — how to copy this onto the lab measurement

@@ -9,8 +9,14 @@ One core sweep handles both port counts; run_oneport_sweep and
 run_twoport_sweep are thin wrappers that differ only in how many
 S-parameters they ask for. Each position measured is saved twice:
 
-    Sweeps/<date_str>_<temp_str>/<switch_serials>/raw/<position>.s1p (or .s2p)
+    Sweeps/<date_str>_<temp_str>/<switch_serials>/raw/<position>_run<id>.s1p (or .s2p)
     a QCoDeS run named "<position>" in a shared .db file
+
+The run id in the filename is the QCoDeS run number, which is unique
+across the whole database -- so a file and a run identify each other
+exactly, in both directions, and re-measuring a position never
+overwrites the earlier attempt. Both survive, each tied to the run that
+recorded its conditions.
 
 Database layout: ONE accumulating .db file (mm4250_sweeps.db, beside
 these files -- see DEFAULT_DB_NAME) holds every run ever taken, the way
@@ -35,7 +41,12 @@ Do NOT use paramtype="complex" here -- that one is for complex *scalars*,
 and a complex array written with it writes without error but then fails
 on read-back.
 
-No calibration or de-embedding is applied -- this is raw acquisition.
+No calibration or de-embedding is applied here -- this is raw
+acquisition. What the VNA itself was doing at the time is recorded
+though: every run carries instrument_state()'s snapshot as "vna_*"
+metadata (power, IF bandwidth, whether a cal was on, port extensions,
+electrical delay per trace, and so on), so a file can be audited later
+instead of taken on trust.
 """
 
 from pathlib import Path
@@ -51,6 +62,7 @@ from vna_measure import (
     DEFAULT_VNA_NAME,
     SPARAMS_2PORT,
     _resolve_instrument,
+    instrument_state,
     measure_2port,
     measure_s11,
 )
@@ -146,7 +158,8 @@ def save_s2p(freq_hz, data, path):
 def record_measurement(name, freq_hz, data, exp, touchstone_path=None, **metadata):
     """
     Save one already-measured position as a QCoDeS dataset named `name`
-    (e.g. "RF3") inside the experiment `exp`. Returns the new run's id.
+    (e.g. "RF3") inside the experiment `exp`. Returns the DataSet -- its
+    `.run_id` is the run number.
 
     `data` is a bare complex S11 array or the dict from measure_2port;
     only the S-parameters actually present are registered, so 1-port and
@@ -155,6 +168,12 @@ def record_measurement(name, freq_hz, data, exp, touchstone_path=None, **metadat
     `touchstone_path` and any extra keyword arguments are attached to the
     dataset as metadata, so a run in the .db can always be traced back to
     the raw file and the sweep it came from.
+
+    The DataSet rather than the bare id is returned because a dataset
+    stays writable for metadata after its run closes, and run_sweep needs
+    that: the Touchstone file is named after the run id, so it can't
+    exist until the run does, and its path can only be attached
+    afterwards.
     """
     data = _as_dict(data)
 
@@ -176,24 +195,24 @@ def record_measurement(name, freq_hz, data, exp, touchstone_path=None, **metadat
             ("frequency", freq_hz),
             *[(sparam.lower(), values) for sparam, values in data.items()],
         )
-        datasaver.dataset.add_metadata("n_ports", 2 if len(data) == 4 else 1)
+        dataset = datasaver.dataset
+        dataset.add_metadata("n_ports", 2 if len(data) == 4 else 1)
         if touchstone_path is not None:
-            datasaver.dataset.add_metadata("touchstone_path", str(touchstone_path))
+            dataset.add_metadata("touchstone_path", str(touchstone_path))
         for key, value in metadata.items():
             # A position is reached either by channel number or by state
             # name, never both -- skip whichever one doesn't apply rather
             # than writing a null into the run's metadata.
             if value is not None:
-                datasaver.dataset.add_metadata(key, value)
-        run_id = datasaver.run_id
+                dataset.add_metadata(key, value)
 
-    return run_id
+    return dataset
 
 
 def record_channel(channel, freq_hz, data, exp, touchstone_path=None, **metadata):
     """
     Save one measured RF channel as a run named "RF<n>", tagging it with
-    the channel number. Thin wrapper on record_measurement.
+    the channel number. Returns the DataSet, like record_measurement.
     """
     return record_measurement(
         f"RF{channel}",
@@ -257,8 +276,10 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
     or 1 for S11 only saved as .s1p.
 
     Files land in
-    <out_root>/<date_str>_<temp_str>/<switch_serials>/raw/<position>.s2p,
-    with `out_root` defaulting to a Sweeps/ folder beside this file -- not
+    <out_root>/<date_str>_<temp_str>/<switch_serials>/raw/<position>_run<id>.s2p,
+    where <id> is the QCoDeS run number -- so measuring the same position
+    twice leaves you with both files rather than silently overwriting the
+    first. `out_root` defaults to a Sweeps/ folder beside this file -- not
     beside whatever notebook called it -- so sweeps land in the same place
     no matter where you run from. Pass it explicitly (absolute, or
     relative to the working directory) to put them somewhere else.
@@ -292,6 +313,7 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
     sweep_dir = out_root / f"{date_str}_{temp_str}" / switch_serials
     raw_dir = sweep_dir / "raw"
     suffix = ".s2p" if n_ports == 2 else ".s1p"
+    sparams = SPARAMS_2PORT if n_ports == 2 else ("S11",)
 
     for entry in positions:
         label, channel, state = _position(entry)
@@ -305,23 +327,32 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
         else:
             freq_hz, data = measure_s11(channel, state=state, vna=vna, switch=switch)
 
-        path = raw_dir / f"{label}{suffix}"
-        save_touchstone(freq_hz, data, path)
-        print(f"  saved {path}")
+        # Snapshot the VNA while it's still set the way this measurement
+        # was taken, so the run records what the numbers mean and not
+        # just what they are.
+        vna_state = instrument_state(sparams, vna=vna)
 
-        run_id = record_measurement(
+        # Record before saving, not after: the file is named after the
+        # run id, so the run has to exist before the file can be. The
+        # path is attached to the run once it does.
+        dataset = record_measurement(
             label,
             freq_hz,
             data,
             exp,
-            touchstone_path=path,
             channel=channel,
             state=state,
             switch_serials=switch_serials,
             date_str=date_str,
             temp_str=temp_str,
+            **vna_state,
         )
-        print(f"  recorded run #{run_id} in {db_path.name}")
+        print(f"  recorded run #{dataset.run_id} in {db_path.name}")
+
+        path = raw_dir / f"{label}_run{dataset.run_id}{suffix}"
+        save_touchstone(freq_hz, data, path)
+        dataset.add_metadata("touchstone_path", str(path))
+        print(f"  saved {path}")
 
     return sweep_dir
 

@@ -18,7 +18,14 @@ files and record QCoDeS runs.
 Both 1-port and 2-port live here, on one shared core: ensure_traces /
 measure_sparams take a list of S-parameters and read them all back from a
 single sweep. measure_s11 and measure_2port are thin wrappers on that.
+
+What comes back is the VNA's corrected, unformatted data (SDATA) -- see
+_read_sdata for why that matters and what it still doesn't protect you
+from. instrument_state() snapshots the settings that decide what a
+measurement means; sweep_db attaches it to every run it records.
 """
+
+import numpy as np
 
 from qcodes.instrument import Instrument
 
@@ -90,6 +97,11 @@ def setup_sweep(start=None, stop=None, points=None, if_bandwidth=None,
     Frequencies are in Hz, power in dBm. `averages=1` (or 0) turns
     averaging off; anything higher turns it on and sets the count.
 
+    Two things are always set regardless of what you pass: the trigger
+    source to "IMM" and the RF output on. Those aren't sweep settings so
+    much as the preconditions for a sweep finishing at all -- see
+    _check_ready() for what each one does if left wrong.
+
     Prints and returns the resulting settings.
 
     NOTE: changing the frequency range, number of points or IF bandwidth
@@ -115,7 +127,270 @@ def setup_sweep(start=None, stop=None, points=None, if_bandwidth=None,
         else:
             vna.averages_enabled(False)
 
+    # Not sweep settings, but a sweep can't complete without them: the
+    # VNA has to trigger itself, and the source has to be on.
+    vna.trigger_source("IMM")
+    vna.output(True)
+
     return sweep_settings(vna=vna)
+
+
+# Settings that change what a measurement means but leave no trace in a
+# Touchstone file. Recorded with every run by instrument_state(); the
+# keys become metadata names, prefixed with "vna_".
+VNA_STATE_QUERIES = {
+    "correction_enabled": "SENS:CORR:STAT?",
+    "port_extensions_enabled": "SENS:CORR:EXT:STAT?",
+    "port1_extension_s": "SENS:CORR:EXT:PORT1:TIME?",
+    "port2_extension_s": "SENS:CORR:EXT:PORT2:TIME?",
+    "fixturing_enabled": "CALC:FSIM:STAT?",
+}
+
+# The same, per trace. These are CALC: settings, so they apply to
+# whichever measurement is active and can differ between S-parameters --
+# which is why they're queried per trace rather than read off the
+# instrument-level parameters the driver exposes.
+TRACE_STATE_QUERIES = {
+    "electrical_delay_s": "CALC:CORR:EDEL:TIME?",
+    "phase_offset_deg": "CALC:CORR:OFFS:PHAS?",
+    "magnitude_offset_db": "CALC:CORR:OFFS:MAGN?",
+    "smoothing_enabled": "CALC:SMO:STAT?",
+    "smoothing_aperture": "CALC:SMO:APER?",
+    "trace_math": "CALC:MATH:FUNC?",
+}
+
+
+def _try_ask(instrument, query):
+    """
+    Ask `query` and return the reply as a number where it parses as one,
+    a string otherwise, or None if the instrument won't answer.
+
+    Provenance is best-effort on purpose. These are model- and
+    firmware-dependent SCPI queries, and one a given P5004B doesn't
+    implement should cost you a missing metadata key, not a failed
+    measurement -- hence the broad except. record_measurement drops None
+    values, so an unanswered query simply doesn't appear on the run.
+    """
+    try:
+        reply = instrument.ask(query).strip().strip('"')
+    except Exception:
+        return None
+    try:
+        value = float(reply)
+    except ValueError:
+        return reply
+    return int(value) if value.is_integer() else value
+
+
+def instrument_state(sparams=(), vna=None):
+    """
+    Snapshot everything about the VNA that decides what a measurement
+    means, as a flat dict ready to attach to a QCoDeS run as metadata.
+
+    Reading SDATA keeps the formatting chain out of the numbers (see
+    _read_sdata), but the correction stage upstream of it still shapes
+    them and leaves no trace in a Touchstone file: port extensions, and
+    the instrument's own fixturing/de-embedding. Recording those is what
+    makes a file auditable a year later -- and what lets you notice a run
+    that got de-embedded twice, once on the instrument and once in post.
+
+    `sparams` names the S-parameters to snapshot per-trace settings for.
+    Read-only: traces are looked up by S-parameter and none are created,
+    so this is safe to call on an instrument you don't want to touch.
+    """
+    vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
+
+    state = {
+        "vna_start_hz": vna.start(),
+        "vna_stop_hz": vna.stop(),
+        "vna_points": vna.points(),
+        "vna_if_bandwidth_hz": vna.if_bandwidth(),
+        "vna_power_dbm": vna.power(),
+        "vna_sweep_type": vna.sweep_type(),
+        "vna_averages": vna.averages() if vna.averages_enabled() else 1,
+    }
+    for key, query in VNA_STATE_QUERIES.items():
+        state[f"vna_{key}"] = _try_ask(vna, query)
+
+    if sparams:
+        existing = {tr.trace(): tr for tr in vna.traces}
+        for sparam in sparams:
+            trace = existing.get(sparam)
+            if trace is None:
+                continue
+            for key, query in TRACE_STATE_QUERIES.items():
+                state[f"vna_{key}_{sparam}"] = _try_ask(trace, query)
+
+    return state
+
+
+def _read_sdata(trace, vna):
+    """
+    Read one trace's corrected complex S-parameter data.
+
+    Queries SDATA rather than going through the driver's .polar()
+    parameter, which reads FDATA -- the *formatted* data, meaning
+    everything the VNA does downstream of error correction: electrical
+    delay, phase and magnitude offsets, trace math, smoothing,
+    time-domain gating. On a clean instrument the two are identical,
+    which is exactly what makes FDATA risky. Dialing in electrical delay
+    to flatten a phase trace on screen is routine, and under FDATA it
+    would rotate the phase of every file saved afterwards, silently and
+    unrecoverably -- the delay is not written into a Touchstone file, so
+    nothing in the file would say it happened.
+
+    SDATA is corrected but unformatted, so none of that reaches the data.
+    It does not bypass the error correction itself, nor anything applied
+    as part of it: port extensions and on-instrument fixturing sit
+    upstream of SDATA and do reach the data. instrument_state() records
+    those on every run and _check_ready() warns when they're on.
+
+    Returns a complex numpy array, one entry per sweep point.
+    """
+    vna.active_trace(trace.trace_num)
+    raw = vna.visa_handle.query_binary_values(
+        "CALC:DATA? SDATA", datatype="f", is_big_endian=True
+    )
+    raw = np.asarray(raw, dtype=np.float64)
+
+    points = vna.points()
+    if raw.size != 2 * points:
+        raise RuntimeError(
+            f"Expected {2 * points} numbers back for a {points} point sweep "
+            f"-- SDATA is a real/imaginary pair per point -- but got "
+            f"{raw.size}. The sweep may have been interrupted."
+        )
+    return raw.reshape((-1, 2)).view(np.complex128).ravel()
+
+
+# Sweep types whose frequency axis can be reconstructed, mapped to the
+# driver parameter that reconstructs it. Anything not in here has an
+# x-axis that start/stop/points don't describe.
+FREQUENCY_AXES = {
+    "LIN": "frequency_axis",
+    "LOG": "frequency_log_axis",
+}
+
+
+def _frequency_axis(vna):
+    """
+    Return the frequency points of the sweep, as a numpy array.
+
+    The VNA is never asked what its x-axis actually is -- the driver
+    computes it from start/stop/points -- so the formula has to match the
+    sweep type. np.linspace is right for a linear sweep and np.geomspace
+    for a log one; for a segment, CW or power sweep neither is, and the
+    wrong one doesn't fail, it just writes plausible-looking frequencies
+    the data never came from. Refuse those instead.
+
+    Computing the axis beats querying the instrument for it here. The
+    driver sets FORM REAL,32 at startup, and float32 steps by 1024 Hz
+    around 10 GHz and 2048 Hz around 20 GHz -- so on a 1-10 GHz, 1001
+    point sweep a queried axis would write 8632000512.0 where the
+    computed one writes 8632000000.0. Round endpoints happen to survive
+    (10 GHz is exactly representable), which only makes the ones that
+    don't harder to notice, and it's enough to stop frequencies matching
+    exactly between a measurement and a cal or model file. If segment
+    sweeps are ever needed, that's the point to add a CALC:X? query under
+    FORM REAL,64, not before.
+    """
+    sweep_type = vna.sweep_type()
+    axis = FREQUENCY_AXES.get(sweep_type)
+    if axis is None:
+        raise RuntimeError(
+            f"VNA sweep type is {sweep_type!r}, and only "
+            f"{'/'.join(sorted(FREQUENCY_AXES))} have a frequency axis this "
+            f"code can reconstruct -- measuring one of the others would "
+            f"save S-parameters against frequencies they didn't come from. "
+            f"Set a linear sweep with {vna.name}.sweep_type('LIN')."
+        )
+    return getattr(vna, axis)()
+
+
+def _check_ready(vna):
+    """
+    Refuse to trigger a sweep the VNA can't finish, or can only finish
+    with nothing connected to the source.
+
+    None of these raises an error of its own, which is what makes them
+    worth checking: a trigger source other than "IMM" leaves run_sweep()
+    waiting forever for a trigger that isn't coming, RF output off writes
+    the noise floor into a Touchstone file that looks perfectly valid,
+    and a sweep type whose axis can't be reconstructed mislabels every
+    frequency. setup_sweep() sets the first two correctly; this catches
+    the case where it wasn't run, or where someone changed things at the
+    front panel afterwards.
+    """
+    source = vna.trigger_source()
+    if source != "IMM":
+        raise RuntimeError(
+            f"VNA trigger source is {source!r}, so the sweep would wait "
+            f"forever for a trigger that isn't coming. Run setup_sweep(), "
+            f"or set it directly with {vna.name}.trigger_source('IMM')."
+        )
+    if not vna.output():
+        raise RuntimeError(
+            f"VNA RF output is off, so the sweep would record the noise "
+            f"floor. Run setup_sweep(), or turn it on with "
+            f"{vna.name}.output(True)."
+        )
+
+    # Only some sweep types have a frequency axis this code can work out.
+    # Find that out now rather than after spending a sweep on it.
+    _frequency_axis(vna)
+
+    # Reading SDATA keeps the formatting chain out of the data, but the
+    # correction stage is upstream of it and does reach the numbers. Both
+    # of these are legitimate things to have on, so warn rather than
+    # refuse -- but say so, because a setup that de-embeds on the
+    # instrument and again in post de-embeds twice, and nothing about the
+    # result looks wrong.
+    for key, what in (
+        ("fixturing_enabled", "fixturing/de-embedding"),
+        ("port_extensions_enabled", "port extensions"),
+    ):
+        if _try_ask(vna, VNA_STATE_QUERIES[key]):
+            print(
+                f"[WARNING] VNA {what} is ON. It is applied before the data is "
+                f"read, so it will be baked into the saved files. Recorded on "
+                f"the run as vna_{key}."
+            )
+
+
+def _add_trace(vna):
+    """
+    Add one trace to the VNA and return it.
+
+    Wrapper around vna.add_trace(), which can't be trusted to report what
+    it did: it matches the new trace catalog against the old one with
+    zip(), and zip() stops at the shorter list -- so when the PNA appends
+    the new trace at the end (the usual case) the added trace is the one
+    entry the loop never reaches, and it raises RuntimeError even though
+    the trace was created fine. The same truncation can also make it
+    return a trace that already existed if the catalog ever comes back
+    reordered, which would be worse: ensure_traces would then repoint a
+    trace it had already set up, silently clobbering an S-parameter.
+
+    So ignore what add_trace() returns, and identify the new trace by
+    diffing the catalog against itself by name. That's correct whatever
+    order the PNA lists things in.
+    """
+    before = {tr.trace_name for tr in vna.traces}
+    try:
+        vna.add_trace()
+    except RuntimeError:
+        # The write went out before it gave up, so the trace is there.
+        pass
+
+    added = [tr for tr in vna.traces if tr.trace_name not in before]
+    if len(added) != 1:
+        raise RuntimeError(
+            f"Expected exactly one new trace on the VNA, found {len(added)}. "
+            f"Traces before: {sorted(before)}. If this is 0, the PNA "
+            f"refused to add one -- check it isn't already at its trace "
+            f"limit, and that nothing else is driving it."
+        )
+    return added[0]
 
 
 def ensure_traces(sparams, vna=None):
@@ -135,7 +410,7 @@ def ensure_traces(sparams, vna=None):
     for sparam in sparams:
         tr = existing.get(sparam)
         if tr is None:
-            tr = vna.add_trace()
+            tr = _add_trace(vna)
             tr.trace(sparam)
             existing[sparam] = tr
         traces.append(tr)
@@ -163,24 +438,32 @@ def measure_sparams(sparams=SPARAMS_2PORT, vna=None):
     VNA's channel, and the P5004B takes care of the reverse sweep needed
     for S12/S22 on its own. This is the generic read that measure_s11 and
     measure_2port are both built on.
+
+    Only linear and log sweeps are supported; see _frequency_axis().
+    The reads themselves never trigger anything, so all the values come
+    from the one sweep by construction.
     """
     vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
+    _check_ready(vna)
 
     traces = ensure_traces(sparams, vna=vna)
-    traces[0].run_sweep()
 
-    # Reading .polar() would otherwise re-trigger its own sweep
-    # (auto_sweep defaults to True); we already swept above, so turn that
-    # off for the reads below -- otherwise each S-parameter would come
-    # from a different sweep.
-    prev_auto_sweep = vna.auto_sweep()
-    vna.auto_sweep(False)
+    # run_sweep() parks the VNA in HOLD and hands back the sweep mode it
+    # was in beforehand. Keep that and put it back at the end -- left
+    # alone, the instrument stops sweeping after every measurement and
+    # the screen goes static, which looks like a hang at the bench.
+    prev_mode = traces[0].run_sweep()
+
+    # _read_sdata only queries -- unlike the driver's .polar(), which
+    # re-triggers a sweep of its own unless auto_sweep is turned off
+    # first. So every S-parameter here comes from the one sweep above
+    # without having to disable anything to make that true.
     try:
-        data = {sparam: tr.polar() for sparam, tr in zip(sparams, traces)}
+        data = {sparam: _read_sdata(tr, vna) for sparam, tr in zip(sparams, traces)}
     finally:
-        vna.auto_sweep(prev_auto_sweep)
+        vna.sweep_mode(prev_mode)
 
-    freq_hz = vna.frequency_axis()
+    freq_hz = _frequency_axis(vna)
     return freq_hz, data
 
 
