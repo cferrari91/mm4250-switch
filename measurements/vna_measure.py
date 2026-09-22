@@ -32,6 +32,27 @@ from qcodes.instrument import Instrument
 DEFAULT_VNA_NAME = "ksvna"
 DEFAULT_SWITCH_NAME = "switch"
 
+# Highest source power these measurements will set or sweep at, in dBm.
+#
+# 0 dBm is where the P5004B's specified maximum output bottoms out across
+# its full range -- +10 dBm from 10 MHz to 6.5 GHz, but only +4 dBm from
+# 16-20 GHz and 0 dBm below 100 kHz -- so it is the most the instrument
+# can deliver levelled at every frequency it covers. It also sits 7 dB
+# under receiver compression at the top of a 1-10 GHz sweep, 27 dB under
+# the +27 dBm damage level, and 4 dB under the MM4250's 0.5 V
+# hot-switching limit. One number, four constraints.
+#
+# The reason it is enforced rather than documented: power is in dBm, so
+# `power=-20` and `power=20` are one keystroke apart and 10,000x apart in
+# watts. Nothing else stands between that typo and the hardware.
+#
+# To go higher deliberately, raise this:
+#     import vna_measure
+#     vna_measure.MAX_POWER_DBM = 5.0
+# which is a visible, greppable act rather than an argument that can be
+# passed by accident.
+MAX_POWER_DBM = 0.0
+
 # The four S-parameters of a full 2-port measurement, in the order a
 # person reads them. NOT the order they go into a .s2p file -- Touchstone
 # wants S11, S21, S12, S22. See save_touchstone() in sweep_db.py.
@@ -97,6 +118,9 @@ def setup_sweep(start=None, stop=None, points=None, if_bandwidth=None,
     Frequencies are in Hz, power in dBm. `averages=1` (or 0) turns
     averaging off; anything higher turns it on and sets the count.
 
+    `power` is refused above MAX_POWER_DBM (0 dBm); see that constant for
+    why, and for how to raise it deliberately if you ever need to.
+
     Two things are always set regardless of what you pass: the trigger
     source to "IMM" and the RF output on. Those aren't sweep settings so
     much as the preconditions for a sweep finishing at all -- see
@@ -119,6 +143,15 @@ def setup_sweep(start=None, stop=None, points=None, if_bandwidth=None,
     if if_bandwidth is not None:
         vna.if_bandwidth(if_bandwidth)
     if power is not None:
+        if power > MAX_POWER_DBM:
+            raise ValueError(
+                f"Refusing to set {power:g} dBm: the ceiling is "
+                f"{MAX_POWER_DBM:g} dBm. Above it the source is no longer "
+                f"levelled across the full band, and the margin to receiver "
+                f"compression and to the switch's 0.5 V hot-switching limit "
+                f"starts running out. If you meant it, raise "
+                f"vna_measure.MAX_POWER_DBM."
+            )
         vna.power(power)
     if averages is not None:
         if averages > 1:
@@ -313,14 +346,23 @@ def _check_ready(vna):
     with nothing connected to the source.
 
     None of these raises an error of its own, which is what makes them
-    worth checking: a trigger source other than "IMM" leaves run_sweep()
-    waiting forever for a trigger that isn't coming, RF output off writes
-    the noise floor into a Touchstone file that looks perfectly valid,
-    and a sweep type whose axis can't be reconstructed mislabels every
-    frequency. setup_sweep() sets the first two correctly; this catches
-    the case where it wasn't run, or where someone changed things at the
-    front panel afterwards.
+    worth checking: source power above the ceiling costs you flatness and
+    margin, a trigger source other than "IMM" leaves run_sweep() waiting
+    forever for a trigger that isn't coming, RF output off writes the
+    noise floor into a Touchstone file that looks perfectly valid, and a
+    sweep type whose axis can't be reconstructed mislabels every
+    frequency. setup_sweep() sets these correctly; this catches the case
+    where it wasn't run, or where someone changed things at the front
+    panel afterwards.
     """
+    power = vna.power()
+    if power > MAX_POWER_DBM:
+        raise RuntimeError(
+            f"VNA source power is {power:g} dBm, above the "
+            f"{MAX_POWER_DBM:g} dBm ceiling. Set it with setup_sweep(power=...), "
+            f"or raise vna_measure.MAX_POWER_DBM if you meant it."
+        )
+
     source = vna.trigger_source()
     if source != "IMM":
         raise RuntimeError(
@@ -478,15 +520,34 @@ def measure_sparam(sparam="S11", vna=None):
     return freq_hz, data[sparam]
 
 
-def _select(channel=None, state=None, switch=None):
+def _select(channel=None, state=None, switch=None, vna=None):
     """
-    Put the switch where the caller asked, if they asked at all.
+    Put the switch where the caller asked, if they asked at all, with the
+    source off while the contacts move.
 
     `channel` (1-6) selects an RF channel; `state` names any switch
     position directly ("ALL_OPEN", "INTERNAL_SHORT", "RFC_RF4", ...).
     Pass neither to measure whatever the switch is already set to, or if
     there's no switch in the setup at all. Returns a short label for the
     position, or None if nothing was changed.
+
+    The MM4250 is an ohmic MEMS switch -- real metal contacts that
+    physically make and break. Moving them with RF flowing draws a
+    micro-arc across the closing gap that erodes and slowly welds the
+    contact. That's "hot switching", capped at 0.5 V by the datasheet
+    (about +4 dBm into 50 ohms), and it doesn't fail the part outright;
+    it collapses the 1.1e9 cycle rating until a channel sticks closed or
+    goes high-resistance. Nothing about the measurement looks wrong while
+    it happens.
+
+    So the source is dropped for the move and restored afterwards. At the
+    -20 dBm the notebooks use there is already 24 dB of margin and this
+    changes nothing; it matters the day someone raises the power and
+    doesn't think about the switch. It costs a few milliseconds, and it
+    removes the question rather than leaving it to be remembered.
+
+    Setting `switch.channel(...)` or `switch.state(...)` by hand skips
+    this -- go through here, or turn the source off yourself first.
     """
     if channel is not None and state is not None:
         raise ValueError("pass channel= or state=, not both")
@@ -494,13 +555,29 @@ def _select(channel=None, state=None, switch=None):
         return None
 
     switch = _resolve_instrument(switch, DEFAULT_SWITCH_NAME, "switch")
-    if channel is not None:
-        switch.channel(channel)
-        label = f"RF{channel}"
+    vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
+
+    source_was_on = vna.output()
+    if source_was_on:
+        vna.output(False)
+    try:
+        if channel is not None:
+            switch.channel(channel)
+            label = f"RF{channel}"
+        else:
+            switch.state(state)
+            label = state
+    finally:
+        # Restore the source even if the switch refused the position --
+        # otherwise a bad channel number would leave the VNA dark and the
+        # next measurement would fail for an unrelated-looking reason.
+        if source_was_on:
+            vna.output(True)
+
+    if source_was_on:
+        print(f"Switch set to {label} (source off during the move)")
     else:
-        switch.state(state)
-        label = state
-    print(f"Switch set to {label}")
+        print(f"Switch set to {label}")
     return label
 
 
@@ -519,7 +596,7 @@ def measure_s11(channel=None, state=None, vna=None, switch=None):
     """
     vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
 
-    _select(channel, state, switch)
+    _select(channel, state, switch, vna=vna)
 
     freq_hz, s11 = measure_sparam("S11", vna=vna)
     print(f"Measured S11: {len(freq_hz)} points, "
@@ -546,7 +623,7 @@ def measure_2port(channel=None, state=None, vna=None, switch=None):
     """
     vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
 
-    _select(channel, state, switch)
+    _select(channel, state, switch, vna=vna)
 
     freq_hz, data = measure_sparams(SPARAMS_2PORT, vna=vna)
     print(f"Measured {', '.join(SPARAMS_2PORT)}: {len(freq_hz)} points, "
