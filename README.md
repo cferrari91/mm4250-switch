@@ -61,6 +61,13 @@ docs/           driver usage notes
   a QCoDeS run), and `run_sweep` (measure + save + record over a list of
   switch positions), with `run_oneport_sweep` / `run_twoport_sweep` as
   the 1- and 2-port wrappers.
+- **`plots.py`** — looking at what came back: `summarize` (min, max and
+  marker values as a printed table), `plot_measurement` (one position,
+  magnitude in dB, optional phase panel) and `plot_sweep` (every position
+  of a finished sweep overlaid, which is how isolation reads off a
+  plot). Reads the Touchstone files back itself — matplotlib and numpy
+  only, and nothing imported from the other two modules, so it plots old
+  sweeps with no instruments connected.
 - **`twoport_sweep.ipynb`** — runnable notebook: connects to the VNA and
   switch, measures S11/S12/S21/S22 at each position you list, and saves
   each to `Sweeps/<date>_<temp>/<switch_serials>/raw/<position>_run<id>.s2p` plus

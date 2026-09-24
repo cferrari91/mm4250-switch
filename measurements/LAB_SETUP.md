@@ -1,6 +1,6 @@
 # Putting the measurement on the lab computer
 
-Copy four files into your folder on the measurement computer. That's it
+Copy five files into your folder on the measurement computer. That's it
 -- no install, no repo clone, nothing else touched.
 
 Written for the DAQ machine as it is today: Windows, code under
@@ -9,14 +9,15 @@ Written for the DAQ machine as it is today: Windows, code under
 
 ---
 
-## 1. Copy these four files
+## 1. Copy these five files
 
-All four live in this repo's `measurements/` folder:
+All five live in this repo's `measurements/` folder:
 
 | File | What it is |
 |---|---|
 | `measurements/vna_measure.py` | the measurement -- `setup_sweep`, `measure_2port`, `measure_s11` |
 | `measurements/sweep_db.py` | saving -- Touchstone files and the QCoDeS database |
+| `measurements/plots.py` | looking at it -- `plot_measurement`, `plot_sweep`, `summarize` |
 | `measurements/twoport_sweep.ipynb` | the 2-port notebook you run |
 | `measurements/oneport_sweep.ipynb` | the 1-port notebook, if you want S11 only |
 
@@ -27,9 +28,8 @@ C:\Users\QTSF_DAQ\Measuring_scripts\QCoDeS-Measurement-Framework\users\Charlie F
 ```
 
 All of them must sit in the **same folder** -- each notebook imports
-the two modules from beside itself. You only need whichever notebook
-you're actually running, but the two `.py` files are required either
-way.
+the modules from beside itself. You only need whichever notebook you're
+actually running, but the three `.py` files are required either way.
 
 Nothing else from this repo is needed. The drivers come from the
 framework repo that's already on that machine.
@@ -37,7 +37,9 @@ framework repo that's already on that machine.
 ### Nothing to install
 
 `qcodes`, `pyvisa`, `hidapi` and `numpy` are all already in the lab's
-`environment.yaml`. This code adds no new dependencies.
+`environment.yaml`, and `matplotlib` comes in with qcodes. This code adds
+no new dependencies -- the plots are matplotlib, not scikit-rf, and
+`plots.py` reads Touchstone files back itself.
 
 ---
 
@@ -53,10 +55,14 @@ Open `twoport_sweep.ipynb` from that folder in Jupyter, with
 3. **Setup** -- `setup_sweep(start=..., stop=..., points=...)`. Also
    puts the VNA in a state where a sweep can finish: trigger source
    `IMM`, RF output on.
-4. **Single measurement** -- `measure_2port(3)`, nothing saved.
+4. **Single measurement** -- `measure_2port(3)`, nothing saved, then
+   `summarize()` and `plot_measurement()` so you see it before
+   committing to a batch.
 5. **Batch sweep** -- edit `positions`/`date_str`/`temp_str`/
    `switch_serials`, then save the whole set.
-6. **Close** -- releases the instruments.
+6. **Plot the sweep** -- `plot_sweep(sweep_dir)` puts every position on
+   one axes.
+7. **Close** -- releases the instruments.
 
 No paths to edit. The notebook works out where it is on its own.
 
@@ -70,6 +76,7 @@ Everything lands in the same folder as the notebook:
 users\Charlie Ferrari\
     vna_measure.py
     sweep_db.py
+    plots.py
     twoport_sweep.ipynb
     oneport_sweep.ipynb
     Sweeps\<date>_<temp>\<serials>\raw\RF<n>_run<id>.s2p   <- created by the sweep
@@ -98,6 +105,7 @@ import sys
 sys.path.insert(0, r"C:\Users\QTSF_DAQ\Measuring_scripts\QCoDeS-Measurement-Framework\users\Charlie Ferrari")
 from vna_measure import setup_sweep, sweep_settings, measure_s11, measure_2port
 from sweep_db import run_oneport_sweep, run_twoport_sweep
+from plots import plot_measurement, plot_sweep, summarize
 ```
 
 Then:
@@ -105,7 +113,11 @@ Then:
 ```python
 setup_sweep(start=1e9, stop=10e9, points=1001, if_bandwidth=1e3, power=-20)
 freq, data = measure_2port(3)
-run_twoport_sweep([1, 3, 5], "20260917", "295K", "SN0001")
+summarize(freq, data)
+plot_measurement(freq, data)
+
+sweep_dir = run_twoport_sweep([1, 3, 5], "20260917", "295K", "SN0001")
+plot_sweep(sweep_dir)
 ```
 
 No `vna=`/`switch=` arguments needed -- the functions find the
@@ -229,6 +241,42 @@ session and then remembered, so only the first position is slow.
 
 ---
 
+## Looking at the data
+
+Three functions, all in `plots.py`, all matplotlib -- no scikit-rf.
+
+`summarize(freq, data)` prints min and max magnitude across the band plus
+the value at three marker frequencies (bottom, middle, top by default;
+pass `markers=[2e9, 6e9, 10e9]` in Hz for your own). Markers report the
+nearest measured point, so nothing is interpolated that wasn't measured.
+
+`plot_measurement(freq, data)` plots one position -- magnitude in dB, one
+line per S-parameter. `phase=True` adds an unwrapped-phase panel
+underneath, which is the view for checking electrical length or chasing a
+cable problem.
+
+`plot_sweep(sweep_dir)` overlays every position of a finished sweep.
+`S21` by default for 2-port files and `S11` for 1-port; pass `sparam=` to
+choose. **This is the plot worth taking to a meeting**: connected
+channels sit near the top, an isolated state drops to the floor, and the
+gap between them is the isolation.
+
+It reads the Touchstone files back rather than using anything in memory,
+so it works on any sweep you've ever taken, from a kernel with no
+instruments connected:
+
+```python
+plot_sweep("Sweeps/20260917_295K/0030")
+plot_sweep("Sweeps/20260917_295K/0030", sparam="S11")
+```
+
+Lines are ordered by run id, so the legend follows the order you measured
+in. `read_touchstone(path)` is there too if you want the raw arrays; it
+handles RI, MA and DB formats and all four frequency units, so it opens
+files the VNA wrote as well as ours.
+
+---
+
 ## Other things worth knowing
 
 **Connecting resets the switch.** `MM4250.__init__` forces `ALL_OPEN` as
@@ -259,7 +307,7 @@ of this.
 
 **Updating later.** These are plain copies, not a git clone. If you
 change the code in the `mm4250-switch` repo, re-copy the changed file(s)
-over. Only the four files above ever need copying.
+over. Only the five files above ever need copying.
 
 **Already have an `mm4250_oneport.db` on that machine?** That's the old
 database name, from before 1- and 2-port sweeps shared one file. Existing
