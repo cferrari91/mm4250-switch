@@ -36,10 +36,70 @@ framework repo that's already on that machine.
 
 ### Nothing to install
 
-`qcodes`, `pyvisa`, `hidapi` and `numpy` are all already in the lab's
+`qcodes`, `pyvisa` and `numpy` are already in the lab's
 `environment.yaml`, and `matplotlib` comes in with qcodes. This code adds
 no new dependencies -- the plots are matplotlib, not scikit-rf, and
 `plots.py` reads Touchstone files back itself.
+
+### Except hidapi, which you probably do have to install
+
+The switch driver's `import hid` needs the Python bindings, and the
+environment as shipped has only the C library. The two are both called
+`hidapi`, which makes this confusing in a specific way: pip sees the name
+satisfied by conda's C library and reports **"Requirement already
+satisfied"** while doing nothing, so `import hid` keeps failing at line 7
+of `MM4250_QCodes_driver.py` no matter how many times you install it.
+
+Confirm that's what's happening -- `None` means the module isn't there at
+all, whatever pip says:
+
+```python
+import importlib.util; print(importlib.util.find_spec("hid"))
+```
+
+Then force pip past its own resolver:
+
+```python
+%pip install --force-reinstall --no-deps hidapi
+```
+
+`--force-reinstall` overrides the already-satisfied check; `--no-deps`
+keeps it from pulling anything else into a shared environment. Re-run the
+`find_spec` line -- a path instead of `None` means it worked -- then
+**restart the kernel**, which is the step that's easy to skip.
+
+If it stays `None`, the conda package that carries the bindings has a
+different name again:
+
+```powershell
+conda install -c conda-forge cython-hidapi
+```
+
+Install `hidapi`, never `hid`. Both give you a module called `hid`, but
+only `hidapi` has the `hid.device()` API this driver uses -- the other
+imports cleanly and then fails inside `MM4250("switch")`.
+
+### Check the environment before anything else
+
+Most import failures here are the wrong kernel, not missing code.
+`sys.executable` is the interpreter actually running your cells; anything
+else is inference.
+
+```python
+import sys, importlib
+print(sys.executable)
+for m in ("qcodes", "pyvisa", "hid", "numpy", "matplotlib"):
+    try:
+        mod = importlib.import_module(m)
+        print(f"  {m:11s} {getattr(mod, '__version__', 'ok')}")
+    except Exception as e:
+        print(f"  {m:11s} FAILED -- {type(e).__name__}: {e}")
+```
+
+The path must contain `envs\QTSF_QCoDeS_env`. If it says `base`,
+activating the env in PowerShell won't fix a kernel that's already
+running -- shut Jupyter down completely (Ctrl+C twice in its window, not
+just the browser tab) and relaunch it from the activated environment.
 
 ---
 
