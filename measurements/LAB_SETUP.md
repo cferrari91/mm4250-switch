@@ -1,6 +1,6 @@
 # Putting the measurement on the lab computer
 
-Copy five files into your folder on the measurement computer. That's it
+Copy six files into your folder on the measurement computer. That's it
 -- no install, no repo clone, nothing else touched.
 
 Written for the DAQ machine as it is today: Windows, code under
@@ -9,14 +9,15 @@ Written for the DAQ machine as it is today: Windows, code under
 
 ---
 
-## 1. Copy these five files
+## 1. Copy these six files
 
-All five live in this repo's `measurements/` folder:
+All six live in this repo's `measurements/` folder:
 
 | File | What it is |
 |---|---|
 | `measurements/vna_measure.py` | the measurement -- `setup_sweep`, `measure_2port`, `measure_s11` |
-| `measurements/sweep_db.py` | saving -- Touchstone files and the QCoDeS database |
+| `measurements/sweep_db.py` | saving -- the QCoDeS database (and Touchstone files, if asked) |
+| `measurements/read_db.py` | reading it back -- `list_runs`, `load_run`, `export_touchstone` |
 | `measurements/plots.py` | looking at it -- `plot_measurement`, `plot_sweep`, `summarize` |
 | `measurements/twoport_sweep.ipynb` | the 2-port notebook you run |
 | `measurements/oneport_sweep.ipynb` | the 1-port notebook, if you want S11 only |
@@ -24,12 +25,12 @@ All five live in this repo's `measurements/` folder:
 into
 
 ```
-C:\Users\QTSF_DAQ\Measuring_scripts\QCoDeS-Measurement-Framework\users\Charlie Ferrari\
+C:\Users\QTSF_DAQ\Measuring_scripts\QCoDeS-Measurement-Framework\Users\Charlie_Ferrari\
 ```
 
 All of them must sit in the **same folder** -- each notebook imports
 the modules from beside itself. You only need whichever notebook you're
-actually running, but the three `.py` files are required either way.
+actually running, but the four `.py` files are required either way.
 
 Nothing else from this repo is needed. The drivers come from the
 framework repo that's already on that machine.
@@ -39,7 +40,7 @@ framework repo that's already on that machine.
 `qcodes`, `pyvisa` and `numpy` are already in the lab's
 `environment.yaml`, and `matplotlib` comes in with qcodes. This code adds
 no new dependencies -- the plots are matplotlib, not scikit-rf, and
-`plots.py` reads Touchstone files back itself.
+`read_db.py` reads the database with Python's own `sqlite3`.
 
 ### Except hidapi, which you probably do have to install
 
@@ -109,20 +110,26 @@ Open `twoport_sweep.ipynb` from that folder in Jupyter, with
 `QTSF_QCoDeS_env` active, and run the cells top to bottom:
 
 1. **Imports** -- finds the drivers by walking up to the framework repo,
-   and imports the two modules from beside the notebook. Prints both
+   and imports the modules from beside the notebook. Prints both
    paths so you can check them.
 2. **Connect** -- creates `ksvna` and `switch`.
 3. **Setup** -- `setup_sweep(start=..., stop=..., points=...)`. Also
    puts the VNA in a state where a sweep can finish: trigger source
    `IMM`, RF output on.
-4. **Single measurement** -- `measure_2port(3)`, nothing saved, then
+4. **Set cal kit** -- activates a saved cal set on the VNA. See
+   [Calibrated sweeps](#calibrated-sweeps) below.
+5. **Single measurement** -- `measure_2port(6)`, nothing saved, then
    `summarize()` and `plot_measurement()` so you see it before
    committing to a batch.
-5. **Batch sweep** -- edit `positions`/`date_str`/`temp_str`/
-   `switch_serials`, then save the whole set.
-6. **Plot the sweep** -- `plot_sweep(sweep_dir)` puts every position on
-   one axes.
-7. **Close** -- releases the instruments.
+6. **Batch sweep** -- edit `positions`/`date_str`/`temp_str`/
+   `switch_serials`/`setup`, then save the whole set. Returns the run
+   ids as `runs`.
+7. **Cal / uncal sweep** -- the same channel measured twice, once with
+   the VNA correction on and once with it off.
+8. **Plot the sweep** -- `plot_sweep(runs)` puts every position on one
+   axes, read back from the database.
+9. **Close** -- turns the VNA output off, opens every switch channel,
+   and releases the instruments.
 
 No paths to edit. The notebook works out where it is on its own.
 
@@ -133,24 +140,114 @@ No paths to edit. The notebook works out where it is on its own.
 Everything lands in the same folder as the notebook:
 
 ```
-users\Charlie Ferrari\
+Users\Charlie_Ferrari\
     vna_measure.py
     sweep_db.py
+    read_db.py
     plots.py
     twoport_sweep.ipynb
     oneport_sweep.ipynb
-    Sweeps\<date>_<temp>\<serials>\raw\RF<n>_run<id>.s2p   <- created by the sweep
-    mm4250_sweeps.db                                 <- created by the sweep
+    mm4250_sweeps.db                                 <- every sweep, always
+    Sweeps\<serials>\<date>\<temp>\<setup>_<cal|uncal>\RF<n>_run<id>.s2p   <- only with touchstone=True
+    figures\<serials>\<date>\<temp>\                <- plots saved with save=, and a day's
+                                                       slide-figure set with its make_figures.py
 ```
+
+**The database is the record; `.s2p` files are optional.** Every number a
+Touchstone file would hold is in `mm4250_sweeps.db` at full precision,
+plus what the VNA was doing, so sweeps save there only unless you pass
+`touchstone=True`. When something outside QCoDeS needs files --
+scikit-rf, the `mm4250-ecal` notebook, Keysight or NIST software,
+sending data to someone -- write them afterwards:
+
+```python
+from read_db import export_touchstone
+export_touchstone(runs)                  # the list a sweep returned
+export_touchstone([43, 44, 45, 46])      # or any run ids
+```
+
+They land exactly where `touchstone=True` would have put them, with the
+same contents. `list_runs()` shows what's in the database; `load_run(43)`
+returns one run as `(freq, data)`. `read_db.py` needs only numpy, so all
+of this works on a laptop without QCoDeS.
+
+A day's slide figures sit in its `figures\<serials>\<date>\<temp>\`
+folder with the `make_figures.py` that rebuilds them from the Touchstone
+files in `Sweeps\` -- `python make_figures.py` from
+anywhere, numpy + matplotlib only. The SN0077 script also reads
+`nist_MM4250_calibration_data_2025\` and `Menlo\Sweeps\` for its
+comparisons, so it only runs from the project folder on a laptop, not from
+the DAQ.
 
 The database accumulates across runs -- every sweep you ever take goes
 into that one file, 1-port and 2-port alike. Each `run_twoport_sweep(...)`
-call is its own QCoDeS *experiment* named `<date>_<temp>_<serials>`; each
+call is its own QCoDeS *experiment* named
+`<date>_<temp>_<serials>_<setup>_<cal|uncal>`; each
 position is a *run* named `RF<n>` (or the switch state name) inside it.
 Browse it later with `plottr-inspectr --db mm4250_sweeps.db`.
 
+The folders go switch -> date -> temperature -> cabling, e.g.
+`Sweeps\SN0077\20260925\295K\RF3_cal\`. Name the cabling with
+`setup="RF3"`; the `_cal` / `_uncal` half is read off the VNA's
+correction state, so it can't be mislabeled. With no `setup` the folder
+is plain `cal` or `uncal`. If the correction changes partway through a
+sweep, the sweep stops rather than file the next position under the
+wrong label.
+
 To put sweeps somewhere else, pass `out_root=` (and `db_path=` for the
 database).
+
+---
+
+## Calibrated sweeps
+
+The VNA applies its own saved calibration. Nothing is corrected in
+Python -- the code turns the instrument's correction on or off and
+records which one it was.
+
+The notebook currently sweeps 1 MHz-10 GHz, 10000 points, IF bandwidth
+1 kHz, -20 dBm, matching cal set `20260911_1MHz_10GHz_female` (2-port,
+reference plane at the cable ends that mate with the switch):
+
+```python
+setup_sweep(start=1e6, stop=10e9, points=10000, if_bandwidth=1e3, power=-20, vna=ksvna)
+
+import vna_measure
+vna_measure.VNA_STATE_QUERIES["cal_set"] = "SENS:CORR:CSET:ACT? NAME"
+ksvna.write('SENS:CORR:CSET:ACT "20260911_1MHz_10GHz_female",0')
+```
+
+The trailing `,0` keeps the current sweep settings; `1` would reset them
+to the cal set's. The `VNA_STATE_QUERIES` line makes each run's metadata
+record the active cal set by name, as `vna_cal_set`. Check what's on before sweeping:
+
+```python
+print(ksvna.ask("SENS:CORR:CSET:CAT? NAME"))   # every saved cal set
+print(ksvna.ask("SENS:CORR:STAT?"))            # 1 = correction on
+print(ksvna.ask("SENS:CORR:CSET:ACT? NAME"))   # which one
+```
+
+The cal / uncal cell measures one channel with the same cabling both
+ways -- VNA port 1 on RFC, port 2 on RF`n` -- so the two can be subtracted:
+
+```python
+n = 6
+positions = [n, "ALL_OPEN", "INTERNAL_LOAD", "INTERNAL_SHORT"]
+
+ksvna.write('SENS:CORR:CSET:ACT "20260911_1MHz_10GHz_female",0')
+run_twoport_sweep(positions, date_str, temp_str, switch_serials, setup=f"RF{n}", ...)   # -> RF6_cal/
+
+ksvna.write('SENS:CORR:CSET:DEAC')
+run_twoport_sweep(positions, date_str, temp_str, switch_serials, setup=f"RF{n}", ...)   # -> RF6_uncal/
+```
+
+The two calls are identical -- the folder follows the VNA. Change `n`,
+re-cable, run again. Each call is its own experiment in the database
+(`<date>_<temp>_<serials>_RF<n>_cal` / `_uncal`).
+
+The cal set is only valid for the frequency range, point count and IF
+bandwidth it was taken at. Change any of those in `setup_sweep` and the
+cal no longer matches the sweep -- take a new cal.
 
 ---
 
@@ -162,7 +259,7 @@ add one cell there after the instrument cells:
 
 ```python
 import sys
-sys.path.insert(0, r"C:\Users\QTSF_DAQ\Measuring_scripts\QCoDeS-Measurement-Framework\users\Charlie Ferrari")
+sys.path.insert(0, r"C:\Users\QTSF_DAQ\Measuring_scripts\QCoDeS-Measurement-Framework\Users\Charlie_Ferrari")
 from vna_measure import setup_sweep, sweep_settings, measure_s11, measure_2port
 from sweep_db import run_oneport_sweep, run_twoport_sweep
 from plots import plot_measurement, plot_sweep, summarize
@@ -176,13 +273,13 @@ freq, data = measure_2port(3)
 summarize(freq, data)
 plot_measurement(freq, data)
 
-sweep_dir = run_twoport_sweep([1, 3, 5], "20260917", "295K", "SN0001")
-plot_sweep(sweep_dir)
+runs = run_twoport_sweep([1, 3, 5], "20260917", "295K", "SN0001", setup="RF1")
+plot_sweep(runs)
 ```
 
 No `vna=`/`switch=` arguments needed -- the functions find the
 instruments the framework notebook already created, by name (`ksvna` and
-`switch`). Outputs still land in your `users\Charlie Ferrari\` folder,
+`switch`). Outputs still land in your `Users\Charlie_Ferrari\` folder,
 because that's where the code is.
 
 The `r"..."` prefix is required on Windows. Without it Python reads the
@@ -198,7 +295,7 @@ and the second one fails.
 
 | What | Where | Change it if |
 |---|---|---|
-| the `users\Charlie Ferrari` path | the `sys.path.insert` line above | only needed for the framework-notebook route, and only if you put the files elsewhere |
+| the `Users\Charlie_Ferrari` path | the `sys.path.insert` line above | only needed for the framework-notebook route, and only if you put the files elsewhere |
 | `ksvna` / `switch` | nothing, normally | the framework notebook registers instruments under other names. Then pass `vna=`/`switch=` explicitly |
 | `mm4250_sweeps.db` | `DEFAULT_DB_NAME` in `sweep_db.py` | you want a different database filename |
 | the VNA address | the connect cell in the notebook | the VNA moves or gets re-addressed |
@@ -315,20 +412,56 @@ line per S-parameter. `phase=True` adds an unwrapped-phase panel
 underneath, which is the view for checking electrical length or chasing a
 cable problem.
 
-`plot_sweep(sweep_dir)` overlays every position of a finished sweep.
-`S21` by default for 2-port files and `S11` for 1-port; pass `sparam=` to
+`plot_sweep(runs)` overlays every position of a finished sweep.
+`S21` by default for 2-port data and `S11` for 1-port; pass `sparam=` to
 choose. **This is the plot worth taking to a meeting**: connected
 channels sit near the top, an isolated state drops to the floor, and the
 gap between them is the isolation.
 
-It reads the Touchstone files back rather than using anything in memory,
-so it works on any sweep you've ever taken, from a kernel with no
-instruments connected:
+It reads the data back from the database rather than using anything in
+memory, so it works on any runs you've ever taken, from a kernel with no
+instruments connected -- or on a folder of Touchstone files:
 
 ```python
-plot_sweep("Sweeps/20260917_295K/0030")
-plot_sweep("Sweeps/20260917_295K/0030", sparam="S11")
+plot_sweep([43, 44, 45, 46])
+plot_sweep([43, 44, 45, 46], sparam="S11")
+plot_sweep("Sweeps/SN0077/20260925/295K/RF3_cal")
+plot_measurement(*load_run(43))           # one run
 ```
+
+Runs from more than one sweep plotted together (cal and uncal, say) get
+their group in the legend, e.g. `RF1 (RF1_cal, run 31)`.
+
+**Adjusting and saving.** Both `plot_sweep` and `plot_measurement` take
+the same optional arguments, all defaulting to the plain plot:
+
+```python
+plot_sweep(runs,
+           xlim=(0, 6), ylim=(-100, 5),        # GHz, dB
+           colors=["black", "tab:red"],        # in run order, or {31: "black", 32: "tab:red"}
+           labels=["thru", "open"],            # legend text, same forms
+           title="SN0077 RF1, 295 K",
+           save=True)
+plot_measurement(run=43, phase=True, colors={"S21": "black"}, save="rf3.pdf")
+```
+
+For `plot_measurement`, colors and labels go by S-parameter instead of
+run. `save=` puts the figure in `figures\<serials>\<date>\<temp>\`
+beside the code -- the same switch -> date -> temperature layout as
+`Sweeps\`, going only as deep as all the runs agree (two switches on one
+plot go in `figures\` itself):
+
+| `save=` | where it goes |
+|---|---|
+| `True` | that folder, named for you -- e.g. `S21_RF1_cal+RF1_uncal_runs31-36.png` |
+| `"isolation.pdf"` | that folder, your name; PNG, PDF or SVG by extension (`.png` if none) |
+| `"C:/somewhere/x.png"` | exactly that path |
+
+A measurement that isn't in the database yet (`plot_measurement(freq,
+data)`) has no switch or date to file under, so it goes in `figures\`.
+Everything returns the matplotlib Axes, so anything else matplotlib can
+do still works afterwards. For side-by-side plots, make the subplots
+yourself and pass `ax=`; `save=` on either one saves the whole figure.
 
 Lines are ordered by run id, so the legend follows the order you measured
 in. `read_touchstone(path)` is there too if you want the raw arrays; it
@@ -343,10 +476,11 @@ files the VNA wrote as well as ours.
 soon as it connects. If you re-run a connect cell mid-session, re-set
 your channel afterwards.
 
-**Calibration is not applied.** These are raw measurements. Calibrate the
-VNA before sweeping, and note that changing frequency range, point count
-or IF bandwidth invalidates the cal -- redo it after `setup_sweep`
-changes any of those. The receiver attenuator counts too: the datasheet
+**Calibration is whatever the VNA has on.** The code does no correction
+of its own -- a sweep is calibrated only if a cal set is active on the
+instrument (see [Calibrated sweeps](#calibrated-sweeps)), and raw
+otherwise. Changing frequency range, point count or IF bandwidth
+invalidates the cal -- redo it after `setup_sweep` changes any of those. The receiver attenuator counts too: the datasheet
 requires adding input attenuation switching uncertainty if it changes
 after a user calibration.
 
@@ -367,7 +501,40 @@ of this.
 
 **Updating later.** These are plain copies, not a git clone. If you
 change the code in the `mm4250-switch` repo, re-copy the changed file(s)
-over. Only the five files above ever need copying.
+over. Only the six files above ever need copying.
+
+**Bringing work back.** The folder is named differently in the two
+places: `Users\Charlie_Ferrari\` on the DAQ, `measurements/` in this repo.
+Nothing depends on the name -- the notebooks find their modules beside
+themselves and walk up to `drivers/` -- so copy the *contents* of
+`Users\Charlie_Ferrari\` into `mm4250-switch/measurements/`, not the
+folder itself. `Sweeps/` and `*.db` are gitignored, so the data comes
+along on disk but not into commits. Before copying:
+
+1. **Save the notebook** (Ctrl+S), or the copy is missing your latest
+   edits and outputs.
+2. **Kernel -> Shut Down Kernel.** QCoDeS keeps the database in WAL mode:
+   new runs are written to `mm4250_sweeps.db-wal` first and folded into
+   `mm4250_sweeps.db` later. Shutting the kernel down closes the
+   database, which folds everything in. `run_sweep` also does this after
+   every position, so the `.db` should already be complete -- this is
+   the backstop.
+3. **Copy all `mm4250_sweeps.db*` files together** if any `-wal` / `-shm`
+   are still there. A `.db` copied without its `-wal` can be missing
+   the newest runs with no error to tell you -- that happened with runs
+   61-62 on 25 Sep before the per-position checkpoint existed.
+
+To check a copied database is complete on its own, from a notebook cell
+in the folder it's in:
+
+```python
+import sqlite3
+con = sqlite3.connect("file:mm4250_sweeps.db?mode=ro&immutable=1", uri=True)
+print(con.execute("select count(*), max(run_id) from runs").fetchone())
+```
+
+`immutable=1` reads the `.db` while ignoring any `-wal`, so if the two
+numbers match what the notebook last printed, nothing is stranded.
 
 **Already have an `mm4250_oneport.db` on that machine?** That's the old
 database name, from before 1- and 2-port sweeps shared one file. Existing

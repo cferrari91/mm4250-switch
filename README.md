@@ -15,8 +15,10 @@ for.
 > and the hardware paths are exercised against one specific VNA and
 > switch. Treat it as a working lab tool rather than a released package.
 >
-> Known gaps: no calibration or de-embedding is applied to the
-> measurements — they are raw S-parameters at the VNA's own port
+> Known gaps: no calibration or de-embedding is done in software. A
+> sweep is calibrated only if a cal set is active on the VNA (the
+> 2-port notebook can take the same channel with correction on and
+> off); otherwise it's raw S-parameters at the VNA's own port
 > reference planes.
 
 ## Layout
@@ -56,25 +58,42 @@ docs/           driver usage notes
   trigger **one** sweep and read them all back as complex data), and the
   two wrappers you'll actually type — `measure_s11` and `measure_2port`.
   Saves nothing; it returns numpy arrays.
-- **`sweep_db.py`** — the data layer on top of it: `save_touchstone`
-  (write `.s1p` or `.s2p`), `record_measurement` (save one measurement as
-  a QCoDeS run), and `run_sweep` (measure + save + record over a list of
-  switch positions), with `run_oneport_sweep` / `run_twoport_sweep` as
-  the 1- and 2-port wrappers.
+- **`sweep_db.py`** — the data layer on top of it: `record_measurement`
+  (save one measurement as a QCoDeS run) and `run_sweep` (measure and
+  record over a list of switch positions, returning the run ids), with
+  `run_oneport_sweep` / `run_twoport_sweep` as the 1- and 2-port
+  wrappers. Saves to the database only unless you pass
+  `touchstone=True`.
+- **`read_db.py`** — reading the database back, with numpy and
+  `sqlite3` only (no QCoDeS, so it works on a laptop): `list_runs`,
+  `load_run` (one run as `(freq, data)`), and `export_touchstone` (write
+  `.s1p`/`.s2p` files from the database, for scikit-rf or anyone without
+  QCoDeS). Also holds the Touchstone writer and the `Sweeps/` layout, so
+  files written during a sweep and exported later are identical.
 - **`plots.py`** — looking at what came back: `summarize` (min, max and
   marker values as a printed table), `plot_measurement` (one position,
   magnitude in dB, optional phase panel) and `plot_sweep` (every position
   of a finished sweep overlaid, which is how isolation reads off a
-  plot). Reads the Touchstone files back itself — matplotlib and numpy
-  only, and nothing imported from the other two modules, so it plots old
-  sweeps with no instruments connected.
+  plot) — by run id from the database, or from a folder of Touchstone
+  files. matplotlib, numpy and `read_db` only, so it plots old sweeps
+  with no instruments connected and no QCoDeS installed.
 - **`twoport_sweep.ipynb`** — runnable notebook: connects to the VNA and
   switch, measures S11/S12/S21/S22 at each position you list, and saves
-  each to `Sweeps/<date>_<temp>/<switch_serials>/raw/<position>_run<id>.s2p` plus
-  a run in `mm4250_sweeps.db`.
+  each as a run in `mm4250_sweeps.db` (plus
+  `Sweeps/<serials>/<date>/<temp>/<setup>_<cal|uncal>/<position>_run<id>.s2p`
+  with `touchstone=True`). Also activates a VNA cal set and runs
+  paired cal / uncal sweeps of the same cabling.
 - **`oneport_sweep.ipynb`** — the same, for S11 only, saved as `.s1p`.
+- **`figures/`** — saved plots. `plot_sweep(..., save=True)` and
+  `plot_measurement(..., save=True)` file them under
+  `figures/<serials>/<date>/<temp>/`, the same layout as `Sweeps/`.
+  Both plots also take `xlim`, `ylim`, `colors`, `labels` and `title`.
+  A day's slide-figure set lives in the same folder with the
+  `make_figures.py` that rebuilds it, e.g.
+  `figures/SN0077/20260925/295K/make_figures.py`.
 - **`LAB_SETUP.md`** — how to copy this onto the lab measurement
-  computer and run it from `users/<name>/`.
+  computer, run it from `Users/Charlie_Ferrari/`, and bring the results
+  back here.
 
 ## Taking a measurement by hand
 
@@ -131,32 +150,56 @@ changing them.
   again on a state that disconnects it. Valid state names are
   `"ALL_OPEN"`, `"RFC_RF1"`–`"RFC_RF6"`, `"INTERNAL_LOAD"` and
   `"INTERNAL_SHORT"`.
+- Each sweep returns its run ids: `runs = run_twoport_sweep(...)`. Plot
+  them with `plot_sweep(runs)`, load one with `load_run(runs[0])`.
+- The database is the record. Sweeps save there only, unless you pass
+  `touchstone=True` to also write `.s1p`/`.s2p` files; files can be
+  written any time later with `export_touchstone(runs)` and come out
+  identical, in the same place.
+- Pass `setup=` to name the cabling, e.g. `setup="RF3"` for VNA port 2
+  on RF3. The runs are grouped (experiment name and, with files, folder)
+  as `<setup>_cal` or `<setup>_uncal` — whether the VNA's correction was on is read off
+  the instrument, not typed, and the sweep stops if it changes
+  mid-sweep. Switch first, so one unit's whole history (every date,
+  every temperature) is under one folder:
+
+  ```
+  Sweeps/
+    SN0077/20260925/295K/RF1_cal/    RF1_run31.s2p  ALL_OPEN_run32.s2p ...
+    SN0077/20260925/295K/RF1_uncal/
+    SN0078/20260924/295K/RF1_uncal/
+  ```
 - Pass `prompt_between=True` if something has to be re-cabled by hand
   between positions — the sweep pauses and waits for Enter before each
   one.
 - Outputs land beside the code — `measurements/Sweeps/...` and
   `measurements/mm4250_sweeps.db`. Both resolve from the module's own
   folder rather than the working directory, so copying these files
-  somewhere else (the lab machine's `users/<name>/`, say) puts the
+  somewhere else (the lab machine's `Users/Charlie_Ferrari/`, say) puts the
   outputs in that folder too. Override with `out_root=` / `db_path=`.
 - Every run accumulates into that one database file. Each
   `run_twoport_sweep(...)` call is its own QCoDeS *experiment*, named
-  `<date_str>_<temp_str>_<switch_serials>` with
+  `<date_str>_<temp_str>_<switch_serials>_<setup>_<cal|uncal>` with
   `sample_name=switch_serials`; each position measured in that call is
   one *run* named `RF<n>` (or the state name) inside it. Re-running the
-  same date/temp/serials adds to that experiment rather than duplicating
+  same date/temp/serials/setup adds to that experiment rather than duplicating
   it. 1-port and 2-port runs can share an experiment — each records only
   the S-parameters it actually measured.
 - Each run carries `n_ports`, `touchstone_path`, `switch_serials`,
   `date_str`, `temp_str` and either `channel` or `state` as dataset
-  metadata, so any run traces back to the raw file it was saved
-  alongside.
+  metadata. `touchstone_path` is set only when the sweep wrote a file,
+  relative to the database's folder, so the link survives copying the
+  folder to another machine.
+- `run_sweep` checkpoints the database after every position, so
+  `mm4250_sweeps.db` is complete on its own even while the kernel that
+  wrote it is still open.
 - Browse the database afterwards with
   `plottr-inspectr --db mm4250_sweeps.db`, or load runs in Python with
   `qcodes.dataset`'s `load_by_id`/`load_by_run_spec`.
 
-No calibration or de-embedding is applied — this is raw acquisition
-only.
+No calibration or de-embedding is done in Python — the data is
+whatever the VNA hands back, corrected only if a cal set is active on
+the instrument. See `LAB_SETUP.md`'s "Calibrated sweeps" section.
 
 ## Running from the lab's measurement framework
 
