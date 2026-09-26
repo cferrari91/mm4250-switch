@@ -19,6 +19,7 @@ class SP6TState(str, PyEnum):
     INTERNAL_LOAD = "INTERNAL_LOAD"
     INTERNAL_SHORT = "INTERNAL_SHORT"
 
+
 # The 6 numbered states, in channel order.
 RF_CHANNEL_STATES = (
     SP6TState.RFC_RF1,
