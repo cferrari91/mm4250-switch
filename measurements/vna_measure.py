@@ -25,6 +25,8 @@ from. instrument_state() snapshots the settings that decide what a
 measurement means; sweep_db attaches it to every run it records.
 """
 
+import time
+
 import numpy as np
 
 from qcodes.instrument import Instrument
@@ -67,6 +69,18 @@ POWER_READBACK_SLACK_DB = 0.05
 # person reads them. NOT the order they go into a .s2p file -- Touchstone
 # wants S11, S21, S12, S22. See save_touchstone() in sweep_db.py.
 SPARAMS_2PORT = ("S11", "S12", "S21", "S22")
+
+# How long to wait after moving the switch before measuring, in seconds.
+#
+# Menlo's cryogenic app note (APN-0021) recommends ~25 ms after a gate
+# transition when the drive lines run into a cryostat: the filtered,
+# resistive wiring slows the ~90 V gate edge well below the datasheet
+# slew rate, so the contacts finish closing later than they would on the
+# bench. 50 ms is twice that. It costs nothing next to a sweep that takes
+# seconds, and the RF source is still off while it runs (see _select).
+# MM4250_QCodes_driver.py doesn't wait on its own; MM4250_finalized.py
+# waits 25 ms, and this adds to it harmlessly.
+SWITCH_SETTLE_S = 0.05
 
 
 def _resolve_instrument(instrument, default_name, label):
@@ -592,6 +606,9 @@ def _select(channel=None, state=None, switch=None, vna=None):
         else:
             switch.state(state)
             label = state
+        # Let the contacts settle before the source comes back on --
+        # see SWITCH_SETTLE_S.
+        time.sleep(SWITCH_SETTLE_S)
     finally:
         # Restore the source even if the switch refused the position --
         # otherwise a bad channel number would leave the VNA dark and the
