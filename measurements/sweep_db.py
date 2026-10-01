@@ -488,6 +488,36 @@ def run_oneport_sweep(positions, date_str, temp_str, switch_serials, **kwargs):
 ECAL_STANDARDS = ("ALL_OPEN", "INTERNAL_SHORT", "INTERNAL_LOAD")
 
 
+def _leave_switch_open(switch, vna):
+    """
+    Cleanup for a sweep that may have died: get the switch to ALL_OPEN
+    whatever state the VNA is in. Never raises, so the error that ended
+    the sweep is the one you see.
+
+    The normal path is _select, which drops the source for the move. If
+    the VNA is what failed (a dropped VISA connection, say), _select
+    can't ask it whether the source is on and never reaches the switch --
+    which left the switch closed on RF2 on 2026-10-01. So fall back to
+    the switch's own USB link, which doesn't need the VNA. At -20 dBm
+    that move is far inside the hot-switching limit (see _select).
+    """
+    try:
+        _select(state="ALL_OPEN", switch=switch, vna=vna)   # normal path: source off for the move
+        return
+    except Exception as e:
+        print(f"  [warning] couldn't open the switch the normal way ({type(e).__name__}: {e})")
+    try:
+        vna.output(False)           # best effort; fails if the VNA link is what died
+    except Exception:
+        pass
+    try:
+        switch.open_all()           # the switch's own USB link, no VNA needed
+        print("  [warning] switch opened directly: ALL_OPEN")
+    except Exception as e:
+        print(f"  [WARNING] SWITCH MAY STILL BE CLOSED -- run switch.open_all() by hand "
+              f"({type(e).__name__}: {e})")
+
+
 def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6),
                  repeats=1, mxc_temp_k=None, note=None, setup="ecal",
                  touchstone=False, out_root=None, db_path=None,
@@ -591,7 +621,7 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
             repeats_out.append(block)
     finally:
         # Even if the set dies partway -- never leave a channel closed.
-        _select(state="ALL_OPEN", switch=switch, vna=vna)
+        _leave_switch_open(switch, vna)
 
     print(f"E-cal set {set_id} complete.")
     return {"set": set_id, "switch_serials": switch_serials, "date_str": date_str,
