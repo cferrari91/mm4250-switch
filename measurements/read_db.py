@@ -5,6 +5,7 @@ from them on demand.
     list_runs()                     what's in the database, one dict per run
     load_run(43)                    (freq_hz, {"S11": ..., "S21": ...}) for one run
     export_touchstone([43, 44])     write .s2p files for runs, in the Sweeps/ layout
+    backup_db()                     consistent, timestamped copy of the database
 
 numpy and the standard library only -- no qcodes. So this runs anywhere
 the .db file is, including a laptop with no QCoDeS installed and no
@@ -23,14 +24,21 @@ uses them, so a file written during a sweep and one exported later are
 byte-for-byte the same and land in the same place.
 """
 
+import hashlib
 import io
+import os
+import re
 import sqlite3
+import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
 DEFAULT_DB_NAME = "mm4250_sweeps.db"
 DEFAULT_OUT_DIR_NAME = "Sweeps"
+DEFAULT_BACKUP_DIR_NAME = "db_backups"
+DEFAULT_BACKUPS_KEPT = 10
 
 # Touchstone column order for a 2-port file is S11, S21, S12, S22 -- NOT
 # the reading order measure_2port uses. Getting these two confused
@@ -291,3 +299,124 @@ def _recorded_file(run, db_path):
         if p.is_file():
             return p
     return None
+
+
+
+# ---------------------------------------------------------------------------
+# Backups
+# ---------------------------------------------------------------------------
+
+def _fingerprint(con):
+    """
+    A hash of everything that says what's in the database: every row of
+    the runs and experiments tables (run ids, names, point counts,
+    timestamps, metadata columns). Two databases with the same fingerprint
+    hold the same runs. Cheap -- those tables are a few hundred rows; the
+    measurement arrays live elsewhere and are covered by result_counter.
+    """
+    h = hashlib.sha256()
+    for table in ("experiments", "runs"):
+        for row in con.execute(f"SELECT * FROM {table} ORDER BY 1"):
+            h.update(repr(row).encode())
+    return h.hexdigest()
+
+
+def _existing_backups(backup_dir, stem):
+    """This database's finished backups, oldest first (names sort by time)."""
+    pattern = re.compile(re.escape(stem) + r"_\d{8}-\d{6}")   # <stem>_YYYYMMDD-HHMMSS
+    return sorted(p for p in Path(backup_dir).glob(f"{stem}_*.db")
+                  if pattern.fullmatch(p.stem))
+
+
+def backup_db(db_path=None, backup_dir=None, keep=DEFAULT_BACKUPS_KEPT, force=False):
+    """
+    Write a consistent, timestamped copy of the database:
+
+        <db folder>/db_backups/mm4250_sweeps_20261015-143022.db
+
+    and delete all but the newest `keep` copies. Returns the new backup's
+    path, or None if nothing changed since the last one.
+
+    Why not just copy the file: QCoDeS keeps the database in WAL mode, so
+    the newest runs can sit in mm4250_sweeps.db-wal until a checkpoint.
+    sweep_db._checkpoint folds them in after every position, but a plain
+    file copy can still catch the .db mid-write, or miss pages a reader was
+    holding back. SQLite's own backup API (used here) reads through the
+    WAL and gives a snapshot of one instant, safe to take while a kernel
+    still has the database open. The copy is switched out of WAL mode, so
+    each backup is one self-contained file -- no -wal/-shm to carry around.
+
+    Each backup is checked (PRAGMA quick_check, and the run count must
+    match) before it gets its final name; a half-written or bad copy is
+    never left looking like a good one.
+
+    If the newest existing backup already holds exactly the same runs,
+    nothing is written (returns None) -- so calling this from every
+    sweep and every Close cell doesn't fill the disk with duplicates.
+    Pass force=True to write one anyway.
+
+    `backup_dir` defaults to a db_backups/ folder beside the database --
+    on the lab machine, Users/Charlie_Ferrari/db_backups/. That protects
+    against a bad write or an accidental delete, not against losing the
+    machine; copy a backup somewhere else now and then for that.
+    """
+    db_path = Path(db_path) if db_path is not None else default_db_path()
+    if not db_path.is_file():
+        raise FileNotFoundError(f"no database at {db_path}")
+    backup_dir = Path(backup_dir) if backup_dir is not None else db_path.parent / DEFAULT_BACKUP_DIR_NAME
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stem = db_path.stem
+    existing = _existing_backups(backup_dir, stem)
+
+    src = sqlite3.connect(str(db_path), timeout=30)
+    try:
+        fingerprint = _fingerprint(src)
+        if existing and not force:
+            last = sqlite3.connect(f"file:{existing[-1].as_posix()}?mode=ro", uri=True)
+            try:
+                same = _fingerprint(last) == fingerprint
+            except sqlite3.Error:
+                same = False                       # unreadable last backup: make a new one
+            finally:
+                last.close()
+            if same:
+                print(f"  backup: no new runs since {existing[-1].name}, nothing written")
+                return None
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        final = backup_dir / f"{stem}_{stamp}.db"
+        while final.exists():                     # two backups in one second: never overwrite
+            time.sleep(1.05)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            final = backup_dir / f"{stem}_{stamp}.db"
+        partial = backup_dir / f"{stem}_{stamp}.db.partial"
+        if partial.exists():
+            partial.unlink()
+        dst = sqlite3.connect(str(partial))
+        try:
+            src.backup(dst)
+            dst.execute("PRAGMA journal_mode=DELETE")
+            check = dst.execute("PRAGMA quick_check").fetchone()[0]
+            n_src = src.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            n_dst = dst.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+    if check != "ok" or n_src != n_dst:
+        partial.unlink()
+        raise RuntimeError(f"backup failed its check (quick_check={check!r}, "
+                           f"runs {n_dst} vs {n_src}); nothing was kept")
+    os.replace(partial, final)
+
+    removed = []
+    if keep is not None and keep > 0:
+        for old in _existing_backups(backup_dir, stem)[:-keep]:
+            old.unlink()
+            removed.append(old.name)
+
+    size_mb = final.stat().st_size / 1e6
+    print(f"  backup: {n_dst} runs -> {final} ({size_mb:.0f} MB)"
+          + (f", removed {len(removed)} older" if removed else ""))
+    return final

@@ -100,6 +100,7 @@ from read_db import (  # noqa: F401
     DEFAULT_DB_NAME,
     DEFAULT_OUT_DIR_NAME,
     TOUCHSTONE_2PORT_ORDER,
+    backup_db,
     save_touchstone,
     sweep_folder,
 )
@@ -309,10 +310,23 @@ def _checkpoint(db_path):
               "in the -wal (another reader has it open); copy the -wal too")
 
 
+def _safe_backup(db_path=None):
+    """
+    read_db.backup_db, for the end of a sweep: never raises, so a backup
+    problem can't hide the sweep's own result or error. Writes nothing if
+    no runs changed since the last backup.
+    """
+    try:
+        backup_db(db_path if db_path is not None else _default_db_path())
+    except Exception as e:
+        print(f"  [warning] database backup failed ({type(e).__name__}: {e}); "
+              "the database itself is fine -- run backup_db() by hand")
+
+
 def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
               setup=None, touchstone=False, out_root=None, db_path=None,
               exp_name=None, prompt_between=False, metadata=None,
-              vna=None, switch=None):
+              backup=True, vna=None, switch=None):
     """
     Measure each entry in `positions` and save it as a QCoDeS run -- and,
     with touchstone=True, as a Touchstone file too. Returns the run ids.
@@ -377,6 +391,11 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
 
         runs = run_twoport_sweep([3, "ALL_OPEN"], ..., setup="RF3")
         plot_sweep(runs)
+
+    `backup=True` (the default) writes a snapshot of the database to
+    db_backups/ beside it once the sweep finishes (read_db.backup_db;
+    skipped if nothing changed). A sweep that dies partway isn't backed
+    up here -- the notebook's Close cell catches those runs.
 
     vna/switch default to the already-instantiated instruments named
     "ksvna"/"switch" if not passed explicitly.
@@ -454,6 +473,8 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
         # halfway still leaves every finished run in the .db proper.
         _checkpoint(db_path)
 
+    if backup and run_ids:
+        _safe_backup(db_path)
     return run_ids
 
 
@@ -600,8 +621,9 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
     # To the millisecond: two sets started within the same second (a quick
     # re-run) must not share an id, or find_set would merge them.
     set_id = datetime.now().strftime("%Y%m%dT%H%M%S.%f")[:-3]
+    # backup=False: one backup for the whole set (below), not one per block.
     common = dict(setup=setup, touchstone=touchstone, out_root=out_root,
-                  db_path=db_path, vna=vna, switch=switch)
+                  db_path=db_path, backup=False, vna=vna, switch=switch)
     tags = {"ecal_set": set_id, "mxc_temp_k": mxc_temp_k, "ecal_note": note}
     print(f"E-cal set {set_id}: {repeats} repeat(s), channels {channels}")
 
@@ -622,6 +644,7 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
     finally:
         # Even if the set dies partway -- never leave a channel closed.
         _leave_switch_open(switch, vna)
+        _safe_backup(db_path)       # also backs up a set that died partway
 
     print(f"E-cal set {set_id} complete.")
     return {"set": set_id, "switch_serials": switch_serials, "date_str": date_str,

@@ -207,6 +207,11 @@ changing them.
 - `run_sweep` checkpoints the database after every position, so
   `mm4250_sweeps.db` is complete on its own even while the kernel that
   wrote it is still open.
+- Each sweep, e-cal set and Close cell also writes a snapshot to
+  `measurements/db_backups/` with `read_db.backup_db()`: consistent while
+  the kernel is running, one self-contained file, skipped if nothing is
+  new, newest 10 kept. Copy a backup, not the live `.db`, to move data
+  between machines.
 - Browse the database afterwards with
   `plottr-inspectr --db mm4250_sweeps.db`, or load runs in Python with
   `qcodes.dataset`'s `load_by_id`/`load_by_run_spec`.

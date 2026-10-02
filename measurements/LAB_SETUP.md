@@ -174,6 +174,7 @@ Users\Charlie_Ferrari\
     mm4250_sweeps.ipynb
     ideals_3K\  ideals_295K\                       <- NIST definitions, for section D
     mm4250_sweeps.db                                 <- every sweep, always
+    db_backups\mm4250_sweeps_<YYYYMMDD-HHMMSS>.db   <- snapshot after each sweep and at Close (newest 10 kept)
     Sweeps\<serials>\<date>\<temp>\<setup>_<cal|uncal>\RF<n>_run<id>.s2p   <- only with touchstone=True
     Sweeps\<serials>\<date>\<temp>\ecal_corrected_<set>\RF<n>.s1p       <- ecal.export_corrected
     figures\<serials>\<date>\<temp>\                <- plots saved with save=, and a day's
@@ -197,6 +198,16 @@ They land exactly where `touchstone=True` would have put them, with the
 same contents. `list_runs()` shows what's in the database; `load_run(43)`
 returns one run as `(freq, data)`. `read_db.py` needs only numpy, so all
 of this works on a laptop without QCoDeS.
+
+**Backups.** After every sweep, e-cal set and Close cell, `backup_db()`
+writes a snapshot of the database to `db_backups\` beside it, using
+SQLite's backup API, so the copy is consistent even with the kernel still
+running, and it's one self-contained file (no `-wal`/`-shm`). Nothing is
+written if no runs are new since the last snapshot, and only the newest 10
+are kept. To bring data home, copy the newest file from `db_backups\`
+rather than the live `mm4250_sweeps.db`. These backups sit on the same
+disk, so they guard against a bad write or a mistaken delete, not against
+losing the machine.
 
 A day's slide figures sit in its `figures\<serials>\<date>\<temp>\`
 folder with the `make_figures.py` that rebuilds them from the Touchstone

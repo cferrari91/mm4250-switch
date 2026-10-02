@@ -2,9 +2,11 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .DS_Store
+.fuse_hidden*
 
 # generated run data
 Sweeps/
+db_backups/
 *.db
 *.db-wal
 *.db-shm
