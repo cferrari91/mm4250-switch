@@ -157,7 +157,11 @@ class MM4250(Instrument):
         for candidate_state, candidate_bytes in STATE_WIRE_BYTES.items():
             if candidate_bytes == wire_bytes:
                 return candidate_state
-        raise ValueError(f"Buffer bytes {wire_bytes!r} don't match any known SP6TState")
+        raise ValueError(
+            f"Buffer bytes {wire_bytes!r} read back from the driver "
+            "board don't match any known SP6TState -- see "
+            "STATE_WIRE_BYTES."
+        )
 
     # Query the board's current output buffer over HID.
     def _read_output_buffer_from_hardware(self):

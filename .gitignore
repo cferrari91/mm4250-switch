@@ -8,3 +8,6 @@ Sweeps/
 *.db
 *.db-wal
 *.db-shm
+
+# Claude Code project notes (local only)
+CLAUDE.md
