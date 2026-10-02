@@ -31,7 +31,7 @@ up (`../../CLAUDE.md`) for how I want you to work.
 - **The database is the record.** `mm4250_sweeps.db` holds every sweep;
   Touchstone files only with `touchstone=True` or `export_touchstone()`.
   `Sweeps/`, `*.db`, `*.db-wal`, `*.db-shm` are gitignored. Never delete or
-  overwrite a `.db` (there's a `mm4250_sweeps_laptop_backup_20261001.db`).
+  overwrite a `.db`; snapshots live in `measurements/db_backups/`.
 - **Backups:** `read_db.backup_db()` snapshots the db to `db_backups/` beside it (SQLite backup API, consistent while a kernel is open). `run_sweep`, `run_ecal_set` and every notebook's Close cell call it; skipped if nothing changed; newest 10 kept. Don't remove those calls. To move data between machines, copy a backup, not the live `.db`.
 - Layout: `Sweeps/<serials>/<date>/<temp>/<setup>_<cal|uncal>/<position>_run<id>.s2p`.
   cal/uncal is read from the VNA, never typed.
