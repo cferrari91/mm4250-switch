@@ -22,6 +22,8 @@ up (`../../CLAUDE.md`) for how I want you to work.
   to QCoDeS db), `read_db.py` (read db with sqlite3 + numpy only),
   `plots.py`, `twoport_sweep.ipynb`, `oneport_sweep.ipynb`, `LAB_SETUP.md`.
 - `measurements/figures/<serial>/<date>/<temp>/`: slide figure sets, each with a `make_figures.py` that rebuilds them.
+  `figures/NIST_comparison/295K/` is the Sep 11 vs NIST tier-2 comparison (report figure). Scripts that need the NIST repo
+  or the Sep 11 CSVs are laptop-only and exit with a message if the data is missing.
 
 ## Rules that matter
 
@@ -34,6 +36,8 @@ up (`../../CLAUDE.md`) for how I want you to work.
   overwrite a `.db`; snapshots live in `measurements/db_backups/`.
 - **Backups:** `read_db.backup_db()` snapshots the db to `db_backups/` beside it (SQLite backup API, consistent while a kernel is open). `run_sweep`, `run_ecal_set` and every notebook's Close cell call it; skipped if nothing changed; newest 10 kept. Don't remove those calls. To move data between machines, copy a backup, not the live `.db`.
 - Layout: `Sweeps/<serials>/<date>/<temp>/<setup>_<cal|uncal>/<position>_run<id>.s2p`.
+  Exception: Sep 11 data is `Sweeps/SN00{77,78}/20260911/295K/vna_csv/`, front-panel CSV exports (log magnitude only,
+  read with `plots.read_vna_csv`). Never import it into the db: there's no phase.
   cal/uncal is read from the VNA, never typed.
 - Complex arrays in QCoDeS: `paramtype="array"`, never `"complex"` (writes fine, fails on read-back).
 - Use `qcodes.validators`, not `qcodes.utils.validators` (gone in qcodes 0.58).
@@ -58,6 +62,9 @@ _Last updated: 2026-10-02_
   `ecal.py` + tests, single `mm4250_sweeps.ipynb` for all sweeps (what I want long term),
   SN0077 2026-10-01 295 K e-cal figures, finalized-driver example notebook
   (`ecal-single-notebook` merged 2026-10-01, PR #2).
+- Sep 11 data and the NIST comparison script moved into the repo (branch `sep11-data-into-repo`, 2026-10-02);
+  outputs verified byte-identical. Once merged, `../../Menlo/Sweeps/` and
+  `../../Menlo/295K_Switch_vs_NIST_Comparison_Plots_CALIBRATED_NIST_REFERENCE/` are redundant; Charlie deletes them.
 - `CLAUDE.md` is tracked and public on GitHub (decided 2026-10-01). Keep secrets and tokens out of it.
 - Not done: calibration/de-embedding in software (old SOL pipeline is in `../Archive/mm4250-switch-sweep-prior/`).
 - TODO, later (leave until I ask): run everything neatly from the main notebook,

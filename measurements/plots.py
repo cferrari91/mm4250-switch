@@ -126,6 +126,37 @@ def read_touchstone(path):
     return freq_hz, data
 
 
+def read_vna_csv(path):
+    """
+    Read a CSV saved from the VNA front panel. Returns (freq_hz, db).
+
+    These are Keysight trace exports: "!" header lines, a BEGIN/END pair
+    around the data, and a column-name line such as
+    "Freq(Hz),S21 Log Mag(dB)". Only log-magnitude exports are accepted
+    -- there is no phase in them, so they can't go in the database or be
+    turned into Touchstone.
+    """
+    path = Path(path)
+    columns, rows = None, []
+    with open(path) as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("!") or line.startswith(("BEGIN", "END")):
+                continue
+            if line[0].isdigit():
+                rows.append([float(token) for token in line.split(",")])
+            elif columns is None:
+                columns = line.split(",")
+
+    if columns is None or len(columns) != 2 or columns[0] != "Freq(Hz)" or "Log Mag(dB)" not in columns[1]:
+        raise ValueError(f"{path.name}: expected a 'Freq(Hz),<S> Log Mag(dB)' export, got columns {columns}")
+    if not rows:
+        raise ValueError(f"{path.name}: no data rows")
+
+    data = np.array(rows, dtype=np.float64)
+    return data[:, 0], data[:, 1]
+
+
 def plot_measurement(freq_hz=None, data=None, title=None, phase=False, ax=None,
                      run=None, db_path=None, xlim=None, ylim=None,
                      colors=None, labels=None, save=None):
