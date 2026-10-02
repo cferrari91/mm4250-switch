@@ -2,6 +2,7 @@
 plus like-for-like comparisons with the NIST MM4250 data set.
 
 Run from anywhere:  python make_figures.py
+Laptop analysis only: needs the NIST repo and the 11 Sep CSVs, neither of which is on the DAQ.
 Needs only numpy + matplotlib. Writes one 16:9 PDF per figure (and a PNG
 preview) beside this script, all_figures.pdf, and summary_values.csv.
 
@@ -12,7 +13,7 @@ Ours (SN0077, 295 K, 25 Sep 2026, P5004B, 1 MHz-10 GHz, 10000 pts, IFBW 1 kHz, -
       20260911_1MHz_10GHz_female (2-port, plane at the cable ends that mate with
       the switch), VNA port 1 on RFC, port 2 on RF<n>.
   Sweeps/SN0077/20260925/295K/RF<n>_uncal   same cabling, correction OFF.
-  Menlo/Sweeps/09112026_295K/77                 SN0077 on 11 Sep, same cal set.
+  Sweeps/SN0077/20260911/295K/vna_csv       SN0077 on 11 Sep, same cal set.
 NIST (nist_MM4250_calibration_data_2025, 295 K only):
   single_switch_0030_data  SN0030, RAW VNA data; insertion loss = S21(port1) - S21(thru),
                            i.e. a thru-normalised (response-cal) number. Only RF1 was
@@ -25,6 +26,7 @@ NIST (nist_MM4250_calibration_data_2025, 295 K only):
 """
 from pathlib import Path
 import glob
+import sys
 
 import numpy as np
 import matplotlib
@@ -35,10 +37,14 @@ from matplotlib.backends.backend_pdf import PdfPages
 HERE = Path(__file__).resolve().parent
 USER = HERE.parents[3]                                   # mm4250-switch/measurements
 SDCODE = USER.parents[1]
-PROJ = SDCODE.parent
 CALDIR = USER / "Sweeps" / "SN0077" / "20260925" / "295K"
-SEP11 = PROJ / "Menlo" / "Sweeps" / "09112026_295K" / "77"
+SEP11 = USER / "Sweeps" / "SN0077" / "20260911" / "295K" / "vna_csv"
 NIST = SDCODE / "nist_MM4250_calibration_data_2025"
+for _what, _p in (("NIST data", NIST), ("Sep 11 data", SEP11)):
+    if not _p.is_dir():
+        sys.exit(f"Laptop analysis script: {_what} not found at {_p}. This doesn't run on the DAQ.")
+sys.path.insert(0, str(USER))
+from plots import read_vna_csv                           # noqa: E402
 
 C = {1: "#2a78d6", 2: "#eb6834", 3: "#1baf7a", 4: "#eda100", 5: "#e87ba4", 6: "#008300"}
 VIOLET, RED = "#4a3aa7", "#e34948"
@@ -93,11 +99,6 @@ def ours(ch, cal, state):
     g = glob.glob(str(CALDIR / f"RF{ch}_{tag}" / f"{state}_run*.s2p"))
     assert len(g) == 1, (ch, tag, state, g)
     return read_ts(g[0])
-
-
-def read_csv(path):
-    a = np.array([l.strip().split(",") for l in open(path) if l[:1].isdigit()], float)
-    return a[:, 0], a[:, 1]
 
 
 def db(x):
@@ -314,11 +315,11 @@ save(fig, "06_open_repeatability")
 # ============================================================ 7. day-to-day vs 11 Sep
 fig, axs = plt.subplots(1, 2, figsize=SIZE)
 for ch in CH:
-    fs, y11 = read_csv(SEP11 / f"RF{ch}_S21.csv")
+    fs, y11 = read_vna_csv(SEP11 / f"RF{ch}_S21.csv")
     today = np.interp(fs, f, smooth_db(f, CAL[ch]["S21"], 20e6))
     k = fs >= 0.1e9
     axs[0].plot(fs[k] / 1e9, today[k] - y11[k], color=C[ch], lw=1.3)
-    fs, s11 = read_csv(SEP11 / f"RF{ch}_S11.csv")
+    fs, s11 = read_vna_csv(SEP11 / f"RF{ch}_S11.csv")
     t11 = np.interp(fs, f, smooth_db(f, CAL[ch]["S11"], 20e6))
     axs[1].plot(fs[k] / 1e9, t11[k] - s11[k], color=C[ch], lw=1.1)
     SUMMARY.append(("S21 25Sep - 11Sep (dB), median 0.1-10 GHz", f"RF{ch}", np.median(today[k] - y11[k])))

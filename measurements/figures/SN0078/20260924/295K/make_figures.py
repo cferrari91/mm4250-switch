@@ -2,8 +2,8 @@
 
 Run from anywhere:  python make_figures.py
 Reads the Touchstone files in measurements/Sweeps/SN0078/20260924/295K and the 11 Sep comparison CSVs in
-Menlo/Sweeps, writes one 16:9 PDF per figure beside this script plus
-all_figures.pdf.
+measurements/Sweeps/SN00{77,78}/20260911/295K/vna_csv, writes one 16:9 PDF per figure beside this script plus
+all_figures.pdf. Laptop analysis only: the 11 Sep CSVs aren't on the DAQ.
 """
 import glob
 import sys
@@ -18,9 +18,12 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 USER = HERE.parents[3]                                  # mm4250-switch/measurements
 SWEEPS = USER / "Sweeps" / "SN0078" / "20260924" / "295K"
-SEP11 = USER.parents[2] / "Menlo" / "Sweeps" / "09112026_295K"   # project folder
+SEP11 = {sn: USER / "Sweeps" / sn / "20260911" / "295K" / "vna_csv" for sn in ("SN0078", "SN0077")}
+for _p in SEP11.values():
+    if not _p.is_dir():
+        sys.exit(f"Laptop analysis script: Sep 11 data not found at {_p}. This doesn't run on the DAQ.")
 sys.path.insert(0, str(USER))
-from plots import read_touchstone                       # noqa: E402
+from plots import read_touchstone, read_vna_csv         # noqa: E402
 
 # Categorical palette (validated for CVD); colour follows the channel.
 C = {"RF1": "#2a78d6", "RF2": "#eb6834", "RF3": "#1baf7a",
@@ -58,12 +61,6 @@ def smooth_db(x, n):
     k = np.ones(n)
     p = np.abs(x) ** 2
     return 10 * np.log10(np.convolve(p, k, "same") / np.convolve(np.ones_like(p), k, "same"))
-
-
-def read_csv(path):
-    rows = [l.strip().split(",") for l in open(path) if l[:1].isdigit()]
-    a = np.array(rows, float)
-    return a[:, 0] / 1e9, a[:, 1]
 
 
 def finish(fig, ax, name, note=NOTE, xlim=(0, 10)):
@@ -143,11 +140,11 @@ finish(fig, ax, "04_rf6_dip_runs", NOTE + " · raw", xlim=(6, 10))
 # 5. 11 Sep calibrated comparison
 fig, ax = plt.subplots(figsize=SIZE)
 for ch in CH:
-    f, y = read_csv(SEP11 / "78" / f"{ch}_S21.csv")
-    ax.plot(f, y, color=C[ch], label=f"SN0078 {ch}", lw=2.4 if ch == "RF6" else 1.6,
+    f, y = read_vna_csv(SEP11["SN0078"] / f"{ch}_S21.csv")
+    ax.plot(f / 1e9, y, color=C[ch], label=f"SN0078 {ch}", lw=2.4 if ch == "RF6" else 1.6,
             zorder=3 if ch == "RF6" else 2)
-f, y = read_csv(SEP11 / "77" / "RF6_S21.csv")
-ax.plot(f, y, color=C["RF6"], ls=(0, (6, 3.5)), lw=2.0, label="SN0077 RF6")
+f, y = read_vna_csv(SEP11["SN0077"] / "RF6_S21.csv")
+ax.plot(f / 1e9, y, color=C["RF6"], ls=(0, (6, 3.5)), lw=2.0, label="SN0077 RF6")
 ax.set_ylabel("Calibrated S21 (dB)")
 ax.set_ylim(-14, 0.5)
 ax.legend(ncol=4, loc="lower left", handlelength=1.6, columnspacing=1.0)
