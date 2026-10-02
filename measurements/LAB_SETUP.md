@@ -212,10 +212,13 @@ losing the machine.
 A day's slide figures sit in its `figures\<serials>\<date>\<temp>\`
 folder with the `make_figures.py` that rebuilds them from the Touchstone
 files in `Sweeps\` -- `python make_figures.py` from
-anywhere, numpy + matplotlib only. The SN0077 script also reads
-`nist_MM4250_calibration_data_2025\` and `Menlo\Sweeps\` for its
-comparisons, so it only runs from the project folder on a laptop, not from
-the DAQ.
+anywhere, numpy + matplotlib only. The SN0077 and SN0078 scripts, and
+`figures\NIST_comparison\295K\`, also read the 11 Sep VNA CSV exports in
+`Sweeps\SN00xx\20260911\295K\vna_csv\` (magnitude only, so they aren't in
+the database), and the SN0077 and NIST ones read
+`SD Code\nist_MM4250_calibration_data_2025\`. Those are laptop analysis
+scripts: they stop with a message if that data is missing. Don't copy the
+NIST repo or the 11 Sep CSVs to the DAQ.
 
 The database accumulates across runs -- every sweep you ever take goes
 into that one file, 1-port and 2-port alike. Each `run_twoport_sweep(...)`
