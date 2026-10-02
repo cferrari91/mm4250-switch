@@ -62,8 +62,15 @@ docs/           driver usage notes
   (save one measurement as a QCoDeS run) and `run_sweep` (measure and
   record over a list of switch positions, returning the run ids), with
   `run_oneport_sweep` / `run_twoport_sweep` as the 1- and 2-port
-  wrappers. Saves to the database only unless you pass
-  `touchstone=True`.
+  wrappers, and `run_ecal_set` (one fridge e-cal set: standards, every
+  channel, standards again, tagged so `ecal.py` can find it). Saves to
+  the database only unless you pass `touchstone=True`.
+- **`ecal.py`** — calibrated S11 at each RF channel's connector from
+  the switch's internal open/short/load and NIST's definitions of them
+  (the Menlo/NIST "e-cal"): `find_ideals`, `correct_set`, `drift`,
+  `repeatability`, `plot_ecal`, `export_corrected`. numpy only, so it
+  runs on the DAQ machine at the fridge; checked against scikit-rf's
+  `OnePort` on NIST's dilution-fridge data in `tests/test_ecal.py`.
 - **`read_db.py`** — reading the database back, with numpy and
   `sqlite3` only (no QCoDeS, so it works on a laptop): `list_runs`,
   `load_run` (one run as `(freq, data)`), and `export_touchstone` (write
@@ -77,13 +84,19 @@ docs/           driver usage notes
   plot) — by run id from the database, or from a folder of Touchstone
   files. matplotlib, numpy and `read_db` only, so it plots old sweeps
   with no instruments connected and no QCoDeS installed.
-- **`twoport_sweep.ipynb`** — runnable notebook: connects to the VNA and
+- **`mm4250_sweeps.ipynb`** — **the notebook to use**: one shared setup
+  (imports, connect, session info), then a section per kind of
+  measurement — A 1-port sweep, B VNA-calibrated 2-port sweep, C cal vs
+  uncal, D fridge e-cal, E browse and plot. Each section sets up the VNA
+  itself, so they can run in any order.
+- **`twoport_sweep.ipynb`** — the older 2-port-only notebook, superseded
+  by `mm4250_sweeps.ipynb` and kept until that one has run on hardware: connects to the VNA and
   switch, measures S11/S12/S21/S22 at each position you list, and saves
   each as a run in `mm4250_sweeps.db` (plus
   `Sweeps/<serials>/<date>/<temp>/<setup>_<cal|uncal>/<position>_run<id>.s2p`
   with `touchstone=True`). Also activates a VNA cal set and runs
   paired cal / uncal sweeps of the same cabling.
-- **`oneport_sweep.ipynb`** — the same, for S11 only, saved as `.s1p`.
+- **`oneport_sweep.ipynb`** — the same, for S11 only (also superseded).
 - **`figures/`** — saved plots. `plot_sweep(..., save=True)` and
   `plot_measurement(..., save=True)` file them under
   `figures/<serials>/<date>/<temp>/`, the same layout as `Sweeps/`.
@@ -134,8 +147,9 @@ changing them.
 
 ## Running a batch sweep
 
-- Edit `positions`/`date_str`/`temp_str`/`switch_serials` in
-  `measurements/twoport_sweep.ipynb` (or `oneport_sweep.ipynb`).
+- Set `date_str`/`temp_str`/`switch_serials` once in the Session cell of
+  `measurements/mm4250_sweeps.ipynb`, then edit `positions` in the
+  section you're running.
 - `positions` is a list of RF channel numbers, switch state names as
   strings, or a mix of both:
 

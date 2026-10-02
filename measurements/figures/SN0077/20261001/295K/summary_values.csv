@@ -1,0 +1,117 @@
+quantity,channel,value
+NIST defs: median | |S11| dB | (all ch), 0.1-2 GHz,all,0.02889
+NIST defs: max | |S11| dB | (all ch), 0.1-2 GHz,all,0.1883
+NIST defs: max |S11| dB (>0 is unphysical), 0.1-2 GHz,all,0.04378
+NIST defs: phase min / deg, 0.1-2 GHz,all,-10.67
+NIST defs: phase max / deg, 0.1-2 GHz,all,0.9105
+NIST defs: channel-to-channel |S11| spread dB, median, 0.1-2 GHz,all,0.0388
+NIST defs: median | |S11| dB | (all ch), 2-6 GHz,all,0.09228
+NIST defs: max | |S11| dB | (all ch), 2-6 GHz,all,0.3046
+NIST defs: max |S11| dB (>0 is unphysical), 2-6 GHz,all,0.1577
+NIST defs: phase min / deg, 2-6 GHz,all,-10.74
+NIST defs: phase max / deg, 2-6 GHz,all,2.598
+NIST defs: channel-to-channel |S11| spread dB, median, 2-6 GHz,all,0.09383
+NIST defs: median | |S11| dB | (all ch), 6-10 GHz,all,0.2195
+NIST defs: max | |S11| dB | (all ch), 6-10 GHz,all,0.8874
+NIST defs: max |S11| dB (>0 is unphysical), 6-10 GHz,all,0.3158
+NIST defs: phase min / deg, 6-10 GHz,all,-31.94
+NIST defs: phase max / deg, 6-10 GHz,all,5.339
+NIST defs: channel-to-channel |S11| spread dB, median, 6-10 GHz,all,0.3105
+SN0077 defs: median | |S11| dB | (all ch), 0.1-2 GHz,all,0.06879
+SN0077 defs: max | |S11| dB | (all ch), 0.1-2 GHz,all,0.1512
+SN0077 defs: max |S11| dB (>0 is unphysical), 0.1-2 GHz,all,0.1512
+SN0077 defs: phase min / deg, 0.1-2 GHz,all,-1.031
+SN0077 defs: phase max / deg, 0.1-2 GHz,all,0.9417
+SN0077 defs: channel-to-channel |S11| spread dB, median, 0.1-2 GHz,all,0.02535
+SN0077 defs: median | |S11| dB | (all ch), 2-6 GHz,all,0.2002
+SN0077 defs: max | |S11| dB | (all ch), 2-6 GHz,all,0.4362
+SN0077 defs: max |S11| dB (>0 is unphysical), 2-6 GHz,all,0.1413
+SN0077 defs: phase min / deg, 2-6 GHz,all,-1.675
+SN0077 defs: phase max / deg, 2-6 GHz,all,2.458
+SN0077 defs: channel-to-channel |S11| spread dB, median, 2-6 GHz,all,0.04404
+SN0077 defs: median | |S11| dB | (all ch), 6-10 GHz,all,0.2321
+SN0077 defs: max | |S11| dB | (all ch), 6-10 GHz,all,0.7145
+SN0077 defs: max |S11| dB (>0 is unphysical), 6-10 GHz,all,0.7145
+SN0077 defs: phase min / deg, 6-10 GHz,all,-0.9513
+SN0077 defs: phase max / deg, 6-10 GHz,all,6.85
+SN0077 defs: channel-to-channel |S11| spread dB, median, 6-10 GHz,all,0.1014
+drift repeat 1 open: median,open,0.0002613
+drift repeat 1 open: max,open,0.001035
+drift repeat 1 short: median,short,0.0002557
+drift repeat 1 short: max,short,0.001171
+drift repeat 1 load: median,load,0.0001748
+drift repeat 1 load: max,load,0.0007121
+drift repeat 2 open: median,open,0.0002382
+drift repeat 2 open: max,open,0.0009625
+drift repeat 2 short: median,short,0.0002344
+drift repeat 2 short: max,short,0.001025
+drift repeat 2 load: median,load,0.000175
+drift repeat 2 load: max,load,0.000617
+repeatability: median,RF1,0.0002931
+repeatability: max,RF1,0.002628
+repeatability: median,RF2,0.0002926
+repeatability: max,RF2,0.002731
+repeatability: median,RF3,0.0003081
+repeatability: max,RF3,0.002854
+repeatability: median,RF4,0.0003077
+repeatability: max,RF4,0.002891
+repeatability: median,RF5,0.0003171
+repeatability: max,RF5,0.003036
+repeatability: median,RF6,0.000304
+repeatability: max,RF6,0.002831
+25 Sep short at RFC: |RF1 cabling - RF6 cabling|, median,RFC,0.005075
+25 Sep load at RFC: |RF1 cabling - RF6 cabling|, median,RFC,0.00134
+|dGamma| open def SN0077-NIST, median 0.1-2 GHz,port1,0.05165
+|dGamma| open def SN0077-NIST, median 2-6 GHz,port1,0.08217
+|dGamma| open def SN0077-NIST, median 6-10 GHz,port1,0.1199
+|dGamma| short def SN0077-NIST, median 0.1-2 GHz,port1,0.02593
+|dGamma| short def SN0077-NIST, median 2-6 GHz,port1,0.06925
+|dGamma| short def SN0077-NIST, median 6-10 GHz,port1,0.2158
+|dGamma| load def SN0077-NIST, median 0.1-2 GHz,port1,0.04385
+|dGamma| load def SN0077-NIST, median 2-6 GHz,port1,0.06556
+|dGamma| load def SN0077-NIST, median 6-10 GHz,port1,0.09219
+|dGamma| open def SN0077-NIST, median 0.1-2 GHz,port2,0.04818
+|dGamma| open def SN0077-NIST, median 2-6 GHz,port2,0.08773
+|dGamma| open def SN0077-NIST, median 6-10 GHz,port2,0.1414
+|dGamma| short def SN0077-NIST, median 0.1-2 GHz,port2,0.03269
+|dGamma| short def SN0077-NIST, median 2-6 GHz,port2,0.09663
+|dGamma| short def SN0077-NIST, median 6-10 GHz,port2,0.2688
+|dGamma| load def SN0077-NIST, median 0.1-2 GHz,port2,0.04556
+|dGamma| load def SN0077-NIST, median 2-6 GHz,port2,0.07485
+|dGamma| load def SN0077-NIST, median 6-10 GHz,port2,0.08709
+|dGamma| open def SN0077-NIST, median 0.1-2 GHz,port3,0.06213
+|dGamma| open def SN0077-NIST, median 2-6 GHz,port3,0.1335
+|dGamma| open def SN0077-NIST, median 6-10 GHz,port3,0.1473
+|dGamma| short def SN0077-NIST, median 0.1-2 GHz,port3,0.01072
+|dGamma| short def SN0077-NIST, median 2-6 GHz,port3,0.09077
+|dGamma| short def SN0077-NIST, median 6-10 GHz,port3,0.2892
+|dGamma| load def SN0077-NIST, median 0.1-2 GHz,port3,0.0279
+|dGamma| load def SN0077-NIST, median 2-6 GHz,port3,0.06883
+|dGamma| load def SN0077-NIST, median 6-10 GHz,port3,0.05215
+|dGamma| open def SN0077-NIST, median 0.1-2 GHz,port4,0.06532
+|dGamma| open def SN0077-NIST, median 2-6 GHz,port4,0.08096
+|dGamma| open def SN0077-NIST, median 6-10 GHz,port4,0.0912
+|dGamma| short def SN0077-NIST, median 0.1-2 GHz,port4,0.01435
+|dGamma| short def SN0077-NIST, median 2-6 GHz,port4,0.05319
+|dGamma| short def SN0077-NIST, median 6-10 GHz,port4,0.183
+|dGamma| load def SN0077-NIST, median 0.1-2 GHz,port4,0.03658
+|dGamma| load def SN0077-NIST, median 2-6 GHz,port4,0.05823
+|dGamma| load def SN0077-NIST, median 6-10 GHz,port4,0.08622
+|dGamma| open def SN0077-NIST, median 0.1-2 GHz,port5,0.07111
+|dGamma| open def SN0077-NIST, median 2-6 GHz,port5,0.11
+|dGamma| open def SN0077-NIST, median 6-10 GHz,port5,0.09439
+|dGamma| short def SN0077-NIST, median 0.1-2 GHz,port5,0.02277
+|dGamma| short def SN0077-NIST, median 2-6 GHz,port5,0.07104
+|dGamma| short def SN0077-NIST, median 6-10 GHz,port5,0.2689
+|dGamma| load def SN0077-NIST, median 0.1-2 GHz,port5,0.04005
+|dGamma| load def SN0077-NIST, median 2-6 GHz,port5,0.0662
+|dGamma| load def SN0077-NIST, median 6-10 GHz,port5,0.06848
+|dGamma| open def SN0077-NIST, median 0.1-2 GHz,port6,0.05615
+|dGamma| open def SN0077-NIST, median 2-6 GHz,port6,0.07809
+|dGamma| open def SN0077-NIST, median 6-10 GHz,port6,0.06001
+|dGamma| short def SN0077-NIST, median 0.1-2 GHz,port6,0.02132
+|dGamma| short def SN0077-NIST, median 2-6 GHz,port6,0.05886
+|dGamma| short def SN0077-NIST, median 6-10 GHz,port6,0.1727
+|dGamma| load def SN0077-NIST, median 0.1-2 GHz,port6,0.03741
+|dGamma| load def SN0077-NIST, median 2-6 GHz,port6,0.04873
+|dGamma| load def SN0077-NIST, median 6-10 GHz,port6,0.0617

@@ -19,8 +19,22 @@ All six live in this repo's `measurements/` folder:
 | `measurements/sweep_db.py` | saving -- the QCoDeS database (and Touchstone files, if asked) |
 | `measurements/read_db.py` | reading it back -- `list_runs`, `load_run`, `export_touchstone` |
 | `measurements/plots.py` | looking at it -- `plot_measurement`, `plot_sweep`, `summarize` |
-| `measurements/twoport_sweep.ipynb` | the 2-port notebook you run |
-| `measurements/oneport_sweep.ipynb` | the 1-port notebook, if you want S11 only |
+| `measurements/ecal.py` | the fridge e-cal -- calibrated S11 at each channel's connector |
+| `measurements/mm4250_sweeps.ipynb` | the one notebook you run, for every kind of sweep |
+
+(`twoport_sweep.ipynb` and `oneport_sweep.ipynb` still work but are
+superseded by `mm4250_sweeps.ipynb`; no need to copy them.)
+
+**For the fridge e-cal (section D) also copy NIST's standard
+definitions**, as folders beside the notebook:
+
+| From (on the laptop) | To (beside the notebook) |
+|---|---|
+| `SD Code/nist_MM4250_calibration_data_2025/tier2_scikitrf_caldata/tier2_3k1/` | `ideals_3K/` |
+| `SD Code/nist_MM4250_calibration_data_2025/tier2_scikitrf_caldata/tier2_295k1/` | `ideals_295K/` |
+
+`ecal.find_ideals("3K")` looks for `ideals_3K/` there first. On the
+laptop it finds the NIST repo on its own.
 
 into
 
@@ -28,9 +42,8 @@ into
 C:\Users\QTSF_DAQ\Measuring_scripts\QCoDeS-Measurement-Framework\Users\Charlie_Ferrari\
 ```
 
-All of them must sit in the **same folder** -- each notebook imports
-the modules from beside itself. You only need whichever notebook you're
-actually running, but the four `.py` files are required either way.
+All of them must sit in the **same folder** -- the notebook imports
+the modules from beside itself.
 
 Nothing else from this repo is needed. The drivers come from the
 framework repo that's already on that machine.
@@ -39,8 +52,9 @@ framework repo that's already on that machine.
 
 `qcodes`, `pyvisa` and `numpy` are already in the lab's
 `environment.yaml`, and `matplotlib` comes in with qcodes. This code adds
-no new dependencies -- the plots are matplotlib, not scikit-rf, and
-`read_db.py` reads the database with Python's own `sqlite3`.
+no new dependencies -- the plots are matplotlib, the e-cal is plain
+numpy rather than scikit-rf, and `read_db.py` reads the database with
+Python's own `sqlite3`.
 
 ### Except hidapi, which you probably do have to install
 
@@ -106,30 +120,41 @@ just the browser tab) and relaunch it from the activated environment.
 
 ## 2. Run the notebook
 
-Open `twoport_sweep.ipynb` from that folder in Jupyter, with
-`QTSF_QCoDeS_env` active, and run the cells top to bottom:
+Open `mm4250_sweeps.ipynb` from that folder in Jupyter, with
+`QTSF_QCoDeS_env` active.
+
+**Setup, every session** -- run these four cells in order:
 
 1. **Imports** -- finds the drivers by walking up to the framework repo,
-   and imports the modules from beside the notebook. Prints both
-   paths so you can check them.
-2. **Connect** -- creates `ksvna` and `switch`.
-3. **Setup** -- `setup_sweep(start=..., stop=..., points=...)`. Also
-   puts the VNA in a state where a sweep can finish: trigger source
-   `IMM`, RF output on.
-4. **Set cal kit** -- activates a saved cal set on the VNA. See
-   [Calibrated sweeps](#calibrated-sweeps) below.
-5. **Single measurement** -- `measure_2port(6)`, nothing saved, then
-   `summarize()` and `plot_measurement()` so you see it before
-   committing to a batch.
-6. **Batch sweep** -- edit `positions`/`date_str`/`temp_str`/
-   `switch_serials`/`setup`, then save the whole set. Returns the run
-   ids as `runs`.
-7. **Cal / uncal sweep** -- the same channel measured twice, once with
-   the VNA correction on and once with it off.
-8. **Plot the sweep** -- `plot_sweep(runs)` puts every position on one
-   axes, read back from the database.
-9. **Close** -- turns the VNA output off, opens every switch channel,
-   and releases the instruments.
+   and imports the modules from beside the notebook. Prints both paths
+   so you can check them.
+2. **Connect** -- creates `ksvna` and `switch` (forces `ALL_OPEN`).
+3. **Session** -- `date_str` (defaults to today), `temp_str`,
+   `switch_serials`, and `CAL_SET`, the VNA cal set sections B/C use.
+   Everything below files its runs under these.
+4. **Stop here** -- raises on purpose, so *Run All* ends after Setup.
+   Don't run it by hand; skip past it.
+
+**Then run one section by hand.** Each one starts by setting the VNA up
+itself (`setup_sweep` plus correction on or off), so the order doesn't
+matter:
+
+- **A. 1-port sweep** -- S11 at each position, raw.
+- **B. 2-port sweep** -- S11/S12/S21/S22 with `CAL_SET` on. See
+  [Calibrated sweeps](#calibrated-sweeps) below.
+- **C. Cal vs. uncal** -- one channel measured with the cal set on, then
+  off.
+- **D. Fridge e-cal** -- D1 `run_ecal_set(...)` measures one set (the
+  internal standards, every channel, the standards again, `repeats`
+  times) with correction off; D2 corrects it with NIST's definitions and
+  plots calibrated S11 at each channel's connector. One set per
+  temperature.
+- **E. Browse and plot** -- any runs from any session.
+
+Also there: **Check the VNA** (cal sets, settings, correction state),
+**Quick look** (one measurement, nothing saved), **Close** (VNA output
+off, switch `ALL_OPEN`, instruments released) and the hidapi debugging
+cells.
 
 No paths to edit. The notebook works out where it is on its own.
 
@@ -145,10 +170,12 @@ Users\Charlie_Ferrari\
     sweep_db.py
     read_db.py
     plots.py
-    twoport_sweep.ipynb
-    oneport_sweep.ipynb
+    ecal.py
+    mm4250_sweeps.ipynb
+    ideals_3K\  ideals_295K\                       <- NIST definitions, for section D
     mm4250_sweeps.db                                 <- every sweep, always
     Sweeps\<serials>\<date>\<temp>\<setup>_<cal|uncal>\RF<n>_run<id>.s2p   <- only with touchstone=True
+    Sweeps\<serials>\<date>\<temp>\ecal_corrected_<set>\RF<n>.s1p       <- ecal.export_corrected
     figures\<serials>\<date>\<temp>\                <- plots saved with save=, and a day's
                                                        slide-figure set with its make_figures.py
 ```
@@ -205,7 +232,7 @@ The VNA applies its own saved calibration. Nothing is corrected in
 Python -- the code turns the instrument's correction on or off and
 records which one it was.
 
-The notebook currently sweeps 1 MHz-10 GHz, 10000 points, IF bandwidth
+Sections B and C sweep 1 MHz-10 GHz, 10000 points, IF bandwidth
 1 kHz, -20 dBm, matching cal set `20260911_1MHz_10GHz_female` (2-port,
 reference plane at the cable ends that mate with the switch):
 
