@@ -51,10 +51,11 @@ up (`../../CLAUDE.md`) for how I want you to work.
 
 _Last updated: 2026-10-01_
 
-- `main`: driver, 1-port and 2-port sweeps, db layer, plots, finalized driver + tests.
-- Branch `ecal-single-notebook` (pushed, **not merged**): `ecal.py` + tests,
-  single `mm4250_sweeps.ipynb` for all sweeps (what I want long term),
-  SN0077 2026-10-01 295 K e-cal figures, finalized-driver example notebook.
+- `main`: driver, 1-port and 2-port sweeps, db layer, plots, finalized driver + tests,
+  `ecal.py` + tests, single `mm4250_sweeps.ipynb` for all sweeps (what I want long term),
+  SN0077 2026-10-01 295 K e-cal figures, finalized-driver example notebook
+  (`ecal-single-notebook` merged 2026-10-01, PR #2).
+- `CLAUDE.md` is tracked and public on GitHub (decided 2026-10-01). Keep secrets and tokens out of it.
 - Not done: calibration/de-embedding in software (old SOL pipeline is in `../Archive/mm4250-switch-sweep-prior/`).
 - TODO: `run_sweep` in `sweep_db.py` hardcodes the output path layout under
   `out_root`; I want to change that later. Leave it until I ask.
