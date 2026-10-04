@@ -56,7 +56,7 @@ up (`../../CLAUDE.md`) for how I want you to work.
 
 ## Current status (update this section; keep it short)
 
-_Last updated: 2026-10-03_
+_Last updated: 2026-10-04_
 
 - `main`: driver, 1-port and 2-port sweeps, db layer, plots, finalized driver + tests,
   `ecal.py` + tests, single `mm4250_sweeps.ipynb` for all sweeps (what I want long term),
@@ -64,8 +64,8 @@ _Last updated: 2026-10-03_
   (`ecal-single-notebook` merged 2026-10-01, PR #2).
 - Sep 11 data and the NIST comparison script are in the repo (PR #5 merged 2026-10-03);
   outputs verified byte-identical. The old Menlo NIST comparison folder is deleted (2026-10-03).
-  `../../Menlo/Sweeps/` can go too, after repointing `Claude outputs/2026-09-28 slide revisions/values_560MHz.py`.
-- Finalized driver HID hardening + DAQ hardware check: PR #7 (2026-10-03). Passes the hardware-free tests;
+  Nothing reads `../../Menlo/Sweeps/` any more (`values_560MHz.py` repointed 2026-10-04), so it can go too.
+- Finalized driver HID hardening + DAQ hardware check: PR #7 merged 2026-10-04. Passes the hardware-free tests;
   not yet run on the real board (`measurements/FINALIZED_DRIVER_DAQ_CHECKS.md`).
 - `CLAUDE.md` is tracked and public on GitHub (decided 2026-10-01). Keep secrets and tokens out of it.
 - Not done: calibration/de-embedding in software (old SOL pipeline is in `../Archive/mm4250-switch-sweep-prior/`).
