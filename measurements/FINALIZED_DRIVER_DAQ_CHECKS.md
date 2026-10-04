@@ -1,6 +1,6 @@
 # Finalized driver: DAQ hardware checks
 
-Hardware checks for `drivers/MM4250_finalized.py` (class `MenloMicroMM4250`)
+Hardware checks for `drivers/MM4250_finalized.py` (class `MM4250`)
 before it goes to QCoDeS/Qcodes_contrib_drivers. The hardware-free tests all
 pass, but the new HID code (1 s read timeout, reply echo check, cleanup on a
 failed connect, `serial_number=`) has not run on the real board yet. The

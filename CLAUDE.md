@@ -14,7 +14,7 @@ up (`../../CLAUDE.md`) for how I want you to work.
   `ALL_OPEN` immediately.
 - `drivers/MM4250_QCodes_driver_commented.py`: same driver, tutorial comments. **Keep the two in sync** (`tests/test_driver_sync.py` fails if their code differs; comments/docstrings are ignored, strings are not).
 - `drivers/MM4250_finalized.py`: type-hinted, contrib-style version (aimed at
-  Qcodes_contrib_drivers), class `MenloMicroMM4250`. Tested without hardware by `tests/test_MM4250_finalized.py`;
+  Qcodes_contrib_drivers), class `MM4250`. Tested without hardware by `tests/test_MM4250_finalized.py`;
   `tests/hardware_check_MM4250_finalized.py` is the DAQ hardware check (not collected by pytest); steps in `measurements/FINALIZED_DRIVER_DAQ_CHECKS.md`.
   `docs/MM4250_finalized_example.ipynb` is already the PR version (imports from `qcodes_contrib_drivers`), so it only runs where that's importable.
 - `drivers/N52xx.py`, `KeysightVNA_driver.py`: vendored from QCoDeS (N52xx has local edits). See `THIRD_PARTY.md`.
@@ -62,9 +62,11 @@ _Last updated: 2026-10-03_
   `ecal.py` + tests, single `mm4250_sweeps.ipynb` for all sweeps (what I want long term),
   SN0077 2026-10-01 295 K e-cal figures, finalized-driver example notebook
   (`ecal-single-notebook` merged 2026-10-01, PR #2).
-- Sep 11 data and the NIST comparison script moved into the repo (branch `sep11-data-into-repo`, 2026-10-02);
-  outputs verified byte-identical. The old Menlo NIST comparison folder is deleted (2026-10-03). Once merged,
+- Sep 11 data and the NIST comparison script are in the repo (PR #5 merged 2026-10-03);
+  outputs verified byte-identical. The old Menlo NIST comparison folder is deleted (2026-10-03).
   `../../Menlo/Sweeps/` can go too, after repointing `Claude outputs/2026-09-28 slide revisions/values_560MHz.py`.
+- Finalized driver HID hardening + DAQ hardware check: PR #7 (2026-10-03). Passes the hardware-free tests;
+  not yet run on the real board (`measurements/FINALIZED_DRIVER_DAQ_CHECKS.md`).
 - `CLAUDE.md` is tracked and public on GitHub (decided 2026-10-01). Keep secrets and tokens out of it.
 - Not done: calibration/de-embedding in software (old SOL pipeline is in `../Archive/mm4250-switch-sweep-prior/`).
 - TODO, later (leave until I ask): run everything neatly from the main notebook,
