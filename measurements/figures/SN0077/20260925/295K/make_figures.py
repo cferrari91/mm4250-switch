@@ -237,7 +237,7 @@ ax.text(0.15, 41.2, "datasheet off-state isolation: 40 dB typ. at 10 GHz", color
 floor = np.median([-smooth_db(f, OPEN_C[c]["S21"], 20e6) for c in CH], 0)
 ax.set(xlim=(0, 10), ylim=(30, 110), xlabel="Frequency (GHz)", ylabel="Isolation = −|S21| (dB)")
 ax.axhspan(85, 110, color=INK3, alpha=0.10, lw=0)
-ax.text(9.9, 104, "≳85 dB: at or near the VNA noise floor (−20 dBm source, 1 kHz IFBW)", ha="right", color=INK2, fontsize=11)
+ax.text(9.9, 104, r"$\gtrsim$85 dB: at or near the VNA noise floor (−20 dBm source, 1 kHz IFBW)", ha="right", color=INK2, fontsize=11)
 ch_legend(ax, loc="lower left")
 ax.set_title("Off-state isolation: ALL_OPEN, VNA on RFC and on the named RF port", loc="left", fontsize=14)
 foot(fig, NOTE + " · calibrated · 20 MHz power average")
@@ -261,7 +261,7 @@ spread = np.ptp(np.array(diffs)[:, (f > 0.1e9)], 0)
 SUMMARY.append(("uncal-cal spread across 6 channels (dB), median / max above 0.1 GHz", "all", np.median(spread)))
 ax.set(xlim=(0, 10), ylim=(-6, 0), xlabel="Frequency (GHz)", ylabel="uncal − cal (dB)")
 ax.text(0.15, -5.5, f"six channels overlap: typical spread {np.median(spread):.3f} dB (max {spread.max():.2f} dB)\n"
-        "→ same test-cable response each time, so re-mating the port-2 cable was repeatable", color=INK2, fontsize=11)
+        r"$\rightarrow$ same test-cable response each time, so re-mating the port-2 cable was repeatable", color=INK2, fontsize=11)
 axs[0].set_title("What the VNA calibration removes (test cables + VNA test-set response)", loc="left", fontsize=14)
 foot(fig, NOTE + " · correction toggled with cabling untouched")
 fig.tight_layout(rect=(0, 0.03, 1, 1))
@@ -390,7 +390,7 @@ hs = [plt.Line2D([], [], color=scol[s_], lw=2.2, label=s_) for s_ in scol] + [
 fig.legend(handles=hs, loc="upper left", bbox_to_anchor=(0.01, 0.935), ncol=5, fontsize=10.5, handlelength=1.8, columnspacing=1.2)
 fig.suptitle("Internal-standard definitions at the RF-port SMA plane: our SOLT-derived vs NIST's 295 K ideals",
              x=0.01, ha="left", fontsize=14)
-foot(fig, "Ours: calibrated standard at RFC with the calibrated RFC→RFn path de-embedded · 50 MHz running mean · "
+foot(fig, r"Ours: calibrated standard at RFC with the calibrated RFC$\rightarrow$RFn path de-embedded · 50 MHz running mean · "
      "0.01 ≈ −40 dB error vector")
 fig.tight_layout(rect=(0, 0.03, 1, 0.89))
 save(fig, "09_ideals_vs_nist")
