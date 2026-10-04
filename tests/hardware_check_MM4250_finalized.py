@@ -136,9 +136,9 @@ def part2_driver(mm, boards):
     root.setLevel(logging.DEBUG)
     root.addHandler(counter)
 
-    print(f"  list_connected_boards(): {mm.MenloMicroMM4250.list_connected_boards()}")
+    print(f"  list_connected_boards(): {mm.MM4250.list_connected_boards()}")
 
-    switch = mm.MenloMicroMM4250("switch")
+    switch = mm.MM4250("switch")
     try:
         print(f"  IDN: {switch.IDN()}")
         print(f"  after connect: state={switch.state()} channel={switch.channel()}")
@@ -169,7 +169,7 @@ def part2_driver(mm, boards):
 
         switch.channel(4)
         switch.close()
-        switch = mm.MenloMicroMM4250("switch", reset_on_connect=False)
+        switch = mm.MM4250("switch", reset_on_connect=False)
         print(f"  reconnect without reset: channel={switch.channel()} (expect 4)")
         if switch.channel() != 4:
             failures.append(("reconnect", switch.state()))
@@ -177,16 +177,16 @@ def part2_driver(mm, boards):
 
         serial = boards[0].get("serial_number") if boards else None
         if serial:
-            switch = mm.MenloMicroMM4250("switch", serial_number=serial)
+            switch = mm.MM4250("switch", serial_number=serial)
             print(f"  opened by serial_number={serial!r}: state={switch.state()}")
         else:
             print("  board has no USB serial; skipping serial_number open")
-            switch = mm.MenloMicroMM4250("switch")
+            switch = mm.MM4250("switch")
 
         print(f"  total replies skipped: {counter.skipped}")
         print(f"  FAILURES: {failures or 'none'}")
     finally:
-        if mm.MenloMicroMM4250.exist("switch"):
+        if mm.MM4250.exist("switch"):
             switch.open_all()
             switch.close()
         root.removeHandler(counter)
@@ -194,7 +194,7 @@ def part2_driver(mm, boards):
 
 def part3_unplug(mm):
     print("\n=== Part 3: unplug test")
-    switch = mm.MenloMicroMM4250("switch")
+    switch = mm.MM4250("switch")
     input("  Unplug the driver board's USB cable now, then press Enter...")
     t0 = time.perf_counter()
     try:

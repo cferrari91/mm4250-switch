@@ -27,8 +27,8 @@ Requirements:
     the same name but a different API; it will not work here.
 
 Example:
-    >>> from qcodes_contrib_drivers.drivers.MenloMicro import MenloMicroMM4250
-    >>> switch = MenloMicroMM4250("switch")
+    >>> from qcodes_contrib_drivers.drivers.MenloMicro import MM4250
+    >>> switch = MM4250("switch")
     >>> switch.channel(3)          # connect RFC to RF3
     >>> switch.state()             # read the position back from the board
     'RFC_RF3'
@@ -166,7 +166,7 @@ def _require_hidapi() -> None:
         )
 
 
-class MenloMicroMM4250(Instrument):
+class MM4250(Instrument):
     """Menlo Micro MM4250 SP6T switch, driven by the USB HiV Driver Board.
 
     Args:

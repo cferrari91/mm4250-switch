@@ -21,7 +21,7 @@ import drivers.MM4250_finalized as mm  # noqa: E402
 from drivers.MM4250_finalized import (  # noqa: E402
     STATE_HV_PINS,
     STATE_WIRE_BYTES,
-    MenloMicroMM4250,
+    MM4250,
     SP6TState,
     channel_to_state,
     state_to_channel,
@@ -103,7 +103,7 @@ def board(monkeypatch):
 
 @pytest.fixture
 def switch(board):
-    return MenloMicroMM4250("switch", settle_time=0)
+    return MM4250("switch", settle_time=0)
 
 
 def test_connect_opens_board_and_resets_to_all_open(board, switch):
@@ -114,7 +114,7 @@ def test_connect_opens_board_and_resets_to_all_open(board, switch):
 
 
 def test_custom_ids_and_serial_passed_to_open(board):
-    MenloMicroMM4250(
+    MM4250(
         "switch", vendor_id=0x1234, product_id=0x5678, serial_number="0042", settle_time=0
     )
     assert board.opened_with == (0x1234, 0x5678, "0042")
@@ -122,7 +122,7 @@ def test_custom_ids_and_serial_passed_to_open(board):
 
 def test_reset_on_connect_false_leaves_switch_alone(board):
     board.output = STATE_WIRE_BYTES[SP6TState.RFC_RF4]
-    switch = MenloMicroMM4250("switch", reset_on_connect=False)
+    switch = MM4250("switch", reset_on_connect=False)
     assert board.commits() == []
     assert switch.state.cache.get() == "RFC_RF4"
 
@@ -130,7 +130,7 @@ def test_reset_on_connect_false_leaves_switch_alone(board):
 def test_reset_on_connect_false_with_unknown_buffer_warns(board, caplog):
     board.output = (0xFF,) * 6
     with caplog.at_level(logging.WARNING):
-        MenloMicroMM4250("switch", reset_on_connect=False)
+        MM4250("switch", reset_on_connect=False)
     assert "Could not determine switch state" in caplog.text
 
 
@@ -212,7 +212,7 @@ def test_no_reply_times_out_instead_of_hanging(board, switch, monkeypatch):
 def test_replies_to_other_commands_are_skipped(monkeypatch):
     chatty = FakeDriverBoard(replies_to_writes=True)
     monkeypatch.setattr(mm, "hid", fake_hid(chatty))
-    switch = MenloMicroMM4250("switch", settle_time=0)
+    switch = MM4250("switch", settle_time=0)
     try:
         for channel in (1, 4, 6):
             switch.channel(channel)  # queues stale set/commit replies
@@ -244,7 +244,7 @@ def test_open_all(board, switch):
 def test_settle_time_used_after_each_switch(board, monkeypatch):
     sleeps = []
     monkeypatch.setattr(mm.time, "sleep", sleeps.append)
-    switch = MenloMicroMM4250("switch")
+    switch = MM4250("switch")
     assert sleeps == [mm.DEFAULT_SETTLE_TIME_S]
     switch.settle_time(0.1)
     switch.channel(2)
@@ -282,7 +282,7 @@ def test_get_idn_reports_board_serial(board, switch):
 @pytest.mark.parametrize("serial", ["", None])
 def test_get_idn_without_usb_serial(monkeypatch, serial):
     monkeypatch.setattr(mm, "hid", fake_hid(FakeDriverBoard(serial=serial)))
-    switch = MenloMicroMM4250("switch", settle_time=0)
+    switch = MM4250("switch", settle_time=0)
     try:
         assert switch.get_idn()["serial"] is None
     finally:
@@ -291,7 +291,7 @@ def test_get_idn_without_usb_serial(monkeypatch, serial):
 
 def test_list_connected_boards(monkeypatch):
     monkeypatch.setattr(mm, "hid", fake_hid(FakeDriverBoard("A1"), FakeDriverBoard("B2")))
-    boards = MenloMicroMM4250.list_connected_boards()
+    boards = MM4250.list_connected_boards()
     assert [b["serial_number"] for b in boards] == ["A1", "B2"]
     assert set(boards[0]) == {"serial_number", "product_string", "manufacturer_string", "path"}
 
@@ -308,9 +308,9 @@ def test_snapshot_is_json_serializable_on_every_state(switch, state):
 def test_close_releases_board_and_name(monkeypatch):
     first, second = FakeDriverBoard(), FakeDriverBoard()
     monkeypatch.setattr(mm, "hid", fake_hid(first, second))
-    MenloMicroMM4250("switch", settle_time=0).close()
+    MM4250("switch", settle_time=0).close()
     assert first.closed
-    MenloMicroMM4250("switch", settle_time=0).close()  # name is free again
+    MM4250("switch", settle_time=0).close()  # name is free again
 
 
 def test_failed_open_does_not_register_name(board, monkeypatch):
@@ -319,15 +319,15 @@ def test_failed_open_does_not_register_name(board, monkeypatch):
 
     monkeypatch.setattr(board, "open", refuse)
     with pytest.raises(OSError):
-        MenloMicroMM4250("switch")
+        MM4250("switch")
     monkeypatch.setattr(mm, "hid", fake_hid(FakeDriverBoard()))
-    MenloMicroMM4250("switch", settle_time=0)  # would raise "name already in use" if registered
+    MM4250("switch", settle_time=0)  # would raise "name already in use" if registered
 
 
 def test_failed_reset_on_connect_closes_board_and_frees_name(board, monkeypatch):
     monkeypatch.setattr(board, "write", lambda data: -1)
     with pytest.raises(OSError):
-        MenloMicroMM4250("switch")
+        MM4250("switch")
     assert board.closed
     assert not Instrument.exist("switch")
 
@@ -337,7 +337,7 @@ def test_duplicate_name_leaves_live_switch_alone(board, switch, monkeypatch):
     second = FakeDriverBoard()
     monkeypatch.setattr(mm, "hid", fake_hid(second))
     with pytest.raises(KeyError, match="Another instrument has the name"):
-        MenloMicroMM4250("switch")
+        MM4250("switch")
     assert second.opened_with is None
     assert board.output == STATE_WIRE_BYTES[SP6TState.RFC_RF4]
 
@@ -346,9 +346,9 @@ def test_duplicate_name_leaves_live_switch_alone(board, switch, monkeypatch):
 def test_missing_or_wrong_hid_package(monkeypatch, module):
     monkeypatch.setattr(mm, "hid", module)
     with pytest.raises(ImportError, match="hidapi"):
-        MenloMicroMM4250("switch")
+        MM4250("switch")
     with pytest.raises(ImportError, match="hidapi"):
-        MenloMicroMM4250.list_connected_boards()
+        MM4250.list_connected_boards()
 
 
 def test_channel_state_helpers():

@@ -14,7 +14,7 @@ up (`../../CLAUDE.md`) for how I want you to work.
   `ALL_OPEN` immediately.
 - `drivers/MM4250_QCodes_driver_commented.py`: same driver, tutorial comments. **Keep the two in sync** (`tests/test_driver_sync.py` fails if their code differs; comments/docstrings are ignored, strings are not).
 - `drivers/MM4250_finalized.py`: type-hinted, contrib-style version (aimed at
-  Qcodes_contrib_drivers), class `MenloMicroMM4250`. Tested without hardware by `tests/test_MM4250_finalized.py`;
+  Qcodes_contrib_drivers), class `MM4250`. Tested without hardware by `tests/test_MM4250_finalized.py`;
   `tests/hardware_check_MM4250_finalized.py` is the DAQ hardware check (not collected by pytest); steps in `measurements/FINALIZED_DRIVER_DAQ_CHECKS.md`.
   `docs/MM4250_finalized_example.ipynb` is already the PR version (imports from `qcodes_contrib_drivers`), so it only runs where that's importable.
 - `drivers/N52xx.py`, `KeysightVNA_driver.py`: vendored from QCoDeS (N52xx has local edits). See `THIRD_PARTY.md`.
