@@ -62,8 +62,8 @@ _Last updated: 2026-10-03_
   `ecal.py` + tests, single `mm4250_sweeps.ipynb` for all sweeps (what I want long term),
   SN0077 2026-10-01 295 K e-cal figures, finalized-driver example notebook
   (`ecal-single-notebook` merged 2026-10-01, PR #2).
-- Sep 11 data and the NIST comparison script moved into the repo (branch `sep11-data-into-repo`, 2026-10-02);
-  outputs verified byte-identical. The old Menlo NIST comparison folder is deleted (2026-10-03). Once merged,
+- Sep 11 data and the NIST comparison script are in the repo (PR #5 merged 2026-10-03);
+  outputs verified byte-identical. The old Menlo NIST comparison folder is deleted (2026-10-03).
   `../../Menlo/Sweeps/` can go too, after repointing `Claude outputs/2026-09-28 slide revisions/values_560MHz.py`.
 - `CLAUDE.md` is tracked and public on GitHub (decided 2026-10-01). Keep secrets and tokens out of it.
 - Not done: calibration/de-embedding in software (old SOL pipeline is in `../Archive/mm4250-switch-sweep-prior/`).
