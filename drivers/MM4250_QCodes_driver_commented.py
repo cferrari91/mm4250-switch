@@ -62,9 +62,12 @@ import hid
 # The physical truth table -- what the switch can actually do
 # ======================================================================
 # This section has NO hardware-connection logic in it at all -- it's
-# just data, transcribed from Menlo's datasheet (Menlo/Switches.pdf,
-# pages 4-5, "MM4250 - SP6T Cryogenic RF Switch Module" datasheet,
-# Figure 1 and Table 5). Keeping it as plain data at the top of the file
+# just data, transcribed from Menlo's "MM4250 - SP6T Cryogenic RF Switch
+# Module" datasheet, Figure 1 and Table 5 (pages 4-5). It was first read
+# from the v0.2 scan, now at Menlo/Old versions/Switches.pdf; the current
+# datasheet, Menlo/Menlo_MM4250_Preliminary_Datasheet_-_v0.4.pdf, has the
+# same Figure 1 and Table 5 on the same pages (Table 5 checked identical
+# 2026-10-04). Keeping it as plain data at the top of the file
 # (rather than, say, hard-coded strings scattered through the class
 # below) means it's easy to double check against the datasheet, and
 # easy to reuse from more than one method.
@@ -142,11 +145,12 @@ TYPICAL_SWITCH_TIME_S = 0.025
 # The real USB HID wire protocol
 # ======================================================================
 # Everything below comes from Menlo's programming package
-# (Menlo/MM4250_Driver_Programming_Package_202511/, downloaded once
-# Support Portal access came through): `mm4250.py` (their own reference
-# driver) and `MM4250DriverBoardAPI.md` (the protocol writeup). Unlike
-# the datasheet-derived data above, none of this could be verified
-# before -- it's Menlo's private API, not published anywhere public.
+# (Menlo/Driver Board/MM4250_Driver_Programming_Package_202511/,
+# downloaded once Support Portal access came through): `mm4250.py`
+# (their own reference driver) and `MM4250DriverBoardAPI.md` (the
+# protocol writeup). Unlike the datasheet-derived data above, none of
+# this could be verified before -- it's Menlo's private API, not
+# published anywhere public.
 
 #: The USB HiV Driver Board's HID vendor/product IDs. Real, known
 #: values now (straight from `mm4250.py`) -- previously these had to be
