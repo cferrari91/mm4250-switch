@@ -64,7 +64,7 @@ _Last updated: 2026-10-04_
   (`ecal-single-notebook` merged 2026-10-01, PR #2).
 - Sep 11 data and the NIST comparison script are in the repo (PR #5 merged 2026-10-03);
   outputs verified byte-identical. The old Menlo NIST comparison folder is deleted (2026-10-03).
-  Nothing reads `../../Menlo/Sweeps/` any more (`values_560MHz.py` repointed 2026-10-04), so it can go too.
+  `../../Menlo/Sweeps/` is deleted too (2026-10-04); `measurements/Sweeps/SN00{77,78}/20260911/` is the copy to use.
 - Finalized driver HID hardening + DAQ hardware check: PR #7 merged 2026-10-04. Passes the hardware-free tests;
   not yet run on the real board (`measurements/FINALIZED_DRIVER_DAQ_CHECKS.md`).
 - `CLAUDE.md` is tracked and public on GitHub (decided 2026-10-01). Keep secrets and tokens out of it.
