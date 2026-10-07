@@ -69,7 +69,7 @@ _Last updated: 2026-10-06_
 - Finalized driver HID hardening + DAQ hardware check: PR #7 merged 2026-10-04. Passes the hardware-free tests;
   not yet run on the real board (`measurements/FINALIZED_DRIVER_DAQ_CHECKS.md`).
 - `CLAUDE.md` is tracked and public on GitHub (decided 2026-10-01). Keep secrets and tokens out of it.
-- `run_ecal_set(terminations={2: "short", 5: "load"})` records what's on each RF port (per-run `termination`, set-wide `ecal_terminations` JSON; carried into `find_set`/`correct_set`/`plot_ecal`), via a new `run_sweep(position_metadata=...)`. Tests pass; committed 2026-10-07 on branch `ecal-terminations-first-cooldown` (not pushed or merged), not yet run on hardware.
+- `run_ecal_set(terminations={2: "short", 5: "load"})` records what's on each RF port (per-run `termination`, set-wide `ecal_terminations` JSON; carried into `find_set`/`correct_set`/`plot_ecal`), via a new `run_sweep(position_metadata=...)`. Tests pass; committed 2026-10-07 on branch `ecal-terminations-first-cooldown` (pushed, no PR yet), not yet run on hardware.
 - Not done: calibration/de-embedding in software (old SOL pipeline is in `../Archive/mm4250-switch-sweep-prior/`).
 - TODO, later (leave until I ask): run everything neatly from the main notebook,
   with data saved to a specific or user-selected location. Today the `.db`,
