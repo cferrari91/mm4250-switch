@@ -50,6 +50,7 @@ Things this can't fix, so they're worth knowing:
     open has |G| ~ 3 at 1 MHz), so results are cropped there by default.
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -217,7 +218,9 @@ def list_sets(db_path=None):
     """
     Every e-cal set in the database, oldest first:
     [{"set": ..., "switch_serials": ..., "date_str": ..., "temp_str": ...,
-      "mxc_temp_k": ..., "n_runs": ...}, ...]
+      "mxc_temp_k": ..., "terminations": {2: "short", ...}, "n_runs": ...}, ...]
+
+    "terminations" is {} for a set taken without run_ecal_set(terminations=...).
     """
     con, _ = _connect(db_path)
     try:
@@ -225,15 +228,24 @@ def list_sets(db_path=None):
         if "ecal_set" not in have:
             return []
         mxc = "r.mxc_temp_k" if "mxc_temp_k" in have else "NULL"
+        term = "r.ecal_terminations" if "ecal_terminations" in have else "NULL"
         rows = con.execute(
             f"SELECT r.ecal_set, r.switch_serials, r.date_str, r.temp_str, "
-            f"MIN({mxc}), COUNT(*) FROM runs r WHERE r.ecal_set IS NOT NULL "
+            f"MIN({mxc}), MIN({term}), COUNT(*) FROM runs r WHERE r.ecal_set IS NOT NULL "
             "GROUP BY r.ecal_set ORDER BY MIN(r.run_id)"
         ).fetchall()
     finally:
         con.close()
     return [{"set": s, "switch_serials": sn, "date_str": d, "temp_str": t,
-             "mxc_temp_k": m, "n_runs": n} for s, sn, d, t, m, n in rows]
+             "mxc_temp_k": m, "terminations": _parse_terminations(tj), "n_runs": n}
+            for s, sn, d, t, m, tj, n in rows]
+
+
+def _parse_terminations(text):
+    """The ecal_terminations JSON text -> {channel: description}; {} if absent."""
+    if not text:
+        return {}
+    return {int(ch): what for ch, what in json.loads(text).items()}
 
 
 def find_set(set_id=None, db_path=None):
@@ -251,11 +263,13 @@ def find_set(set_id=None, db_path=None):
 
     con, _ = _connect(db_path)
     try:
-        if "ecal_set" not in _columns(con, "runs"):
+        have = _columns(con, "runs")
+        if "ecal_set" not in have:
             raise LookupError("No e-cal sets in the database")
+        term = "ecal_terminations" if "ecal_terminations" in have else "NULL"
         rows = con.execute(
-            "SELECT run_id, name, ecal_repeat, ecal_role, switch_serials, date_str, temp_str "
-            "FROM runs WHERE ecal_set = ? ORDER BY run_id", (set_id,)
+            "SELECT run_id, name, ecal_repeat, ecal_role, switch_serials, date_str, temp_str, "
+            f"{term} FROM runs WHERE ecal_set = ? ORDER BY run_id", (set_id,)
         ).fetchall()
     finally:
         con.close()
@@ -269,8 +283,9 @@ def find_set(set_id=None, db_path=None):
             block["ports"][int(name[2:])] = run_id        # "RF3" -> 3
         else:
             block[role][name] = run_id
-    _, _, _, _, sn, date, temp = rows[0]
+    _, _, _, _, sn, date, temp, term_json = rows[0]
     return {"set": set_id, "switch_serials": sn, "date_str": date, "temp_str": temp,
+            "terminations": _parse_terminations(term_json),
             "repeats": [repeats[k] for k in sorted(repeats)]}
 
 
@@ -325,6 +340,7 @@ def correct_set(ecal=None, ideals_dir=None, repeat=None, standards="mean",
         raw      {channel: raw S11}          (repeat 1, for comparison)
         terms    {channel: error terms}      (repeat 1)
         per_repeat [{channel: calibrated S11}, ...]
+        terminations {channel: "short", ...}  what was on the ports ({} if not recorded)
         plus set/switch_serials/date_str/temp_str/ideals_dir for labelling
     """
     if ideals_dir is None:
@@ -362,6 +378,7 @@ def correct_set(ecal=None, ideals_dir=None, repeat=None, standards="mean",
     ports = {ch: np.mean([r[ch] for r in per_repeat], axis=0) for ch in channels}
     return {"set": ecal["set"], "switch_serials": ecal["switch_serials"],
             "date_str": ecal["date_str"], "temp_str": ecal["temp_str"],
+            "terminations": dict(ecal.get("terminations") or {}),
             "ideals_dir": str(ideals_dir), "freq": freq[keep], "ports": ports,
             "raw": raw, "terms": terms_out, "per_repeat": per_repeat}
 
@@ -448,11 +465,13 @@ def plot_ecal(result, channels=None, show_raw=False, xlim=None, ylim_db=None, sa
     import matplotlib.pyplot as plt
 
     channels = channels or sorted(result["ports"])
+    terms = result.get("terminations") or {}
     f = result["freq"] / 1e9
     fig, (ax_m, ax_p) = plt.subplots(2, 1, sharex=True, figsize=(8, 6))
     for ch in channels:
         g = result["ports"][ch]
-        (line,) = ax_m.plot(f, 20 * np.log10(np.abs(g)), label=f"RF{ch}")
+        label = f"RF{ch} ({terms[ch]})" if ch in terms else f"RF{ch}"
+        (line,) = ax_m.plot(f, 20 * np.log10(np.abs(g)), label=label)
         ax_p.plot(f, np.rad2deg(np.angle(g)), color=line.get_color())
         if show_raw:
             ax_m.plot(f, 20 * np.log10(np.abs(result["raw"][ch])), "--",

@@ -215,6 +215,70 @@ def test_bad_arguments(fridge, kw):
         _run(fridge, **kw)
 
 
+def _runs_table(db, *cols):
+    """{run_id: (col, ...)} straight from the runs table."""
+    import sqlite3
+    con = sqlite3.connect(db)
+    try:
+        rows = con.execute(f"SELECT run_id, name, {', '.join(cols)} FROM runs").fetchall()
+    finally:
+        con.close()
+    return {r[0]: r[1:] for r in rows}
+
+
+def test_terminations_tag_each_port_and_the_whole_set(fridge):
+    cal = _run(fridge, channels=[2, 3, 5], terminations={5: "load", 2: "short"})
+    assert cal["terminations"] == {2: "short", 5: "load"}
+    rows = _runs_table(fridge.db, "termination", "ecal_terminations", "ecal_role")
+    by_name = {name: (term, role) for name, term, _, role in rows.values() if role == "port"}
+    assert by_name == {"RF2": ("short", "port"), "RF3": ("none", "port"),
+                       "RF5": ("load", "port")}
+    # The standards carry no per-port tag, but every run carries the set's dict.
+    for name, term, set_json, role in rows.values():
+        assert set_json == '{"2": "short", "5": "load"}'
+        if role != "port":
+            assert term is None
+    # And it all comes back from the database.
+    assert ecal.find_set(None, fridge.db) == cal
+    assert ecal.list_sets(fridge.db)[-1]["terminations"] == {2: "short", 5: "load"}
+    result = ecal.correct_set(None, fridge.ideals_dir, db_path=fridge.db)
+    assert result["terminations"] == {2: "short", 5: "load"}
+
+
+def test_terminations_can_name_a_port_the_set_skips(fridge):
+    cal = _run(fridge, channels=[1], terminations={6: "short"})
+    assert cal["terminations"] == {6: "short"}
+    rows = _runs_table(fridge.db, "termination")
+    assert [t for name, t in rows.values() if name == "RF1"] == ["none"]
+
+
+def test_no_terminations_records_nothing_new(fridge):
+    cal = _run(fridge)
+    assert cal["terminations"] == {}
+    assert ecal.find_set(None, fridge.db) == cal
+    import sqlite3
+    con = sqlite3.connect(fridge.db)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(runs)")}
+    con.close()
+    assert "termination" not in cols and "ecal_terminations" not in cols
+
+
+@pytest.mark.parametrize("terms", [{0: "short"}, {7: "load"}, {"2": "short"},
+                                   {True: "short"}, {2: ""}, {2: None}])
+def test_bad_terminations(fridge, terms):
+    with pytest.raises(ValueError, match="terminations"):
+        _run(fridge, terminations=terms)
+    assert fridge.positions == []          # refused before the switch moved
+
+
+def test_position_metadata_rejects_unknown_positions(fridge):
+    with pytest.raises(ValueError, match="position_metadata"):
+        sweep_db.run_oneport_sweep([1, 2], "20261015", "3K", "SN0077", db_path=fridge.db,
+                                   position_metadata={3: {"x": 1}},
+                                   vna=object(), switch=object())
+    assert fridge.positions == []
+
+
 def test_ideals_range_is_enforced(fridge):
     with pytest.raises(ValueError, match="covers"):
         ecal.load_ideals(fridge.ideals_dir, 1, np.array([50e6, 1e9]))

@@ -67,6 +67,7 @@ delay per trace, and so on), so a run can be audited later instead of
 taken on trust.
 """
 
+import json
 import os
 import sqlite3
 from datetime import datetime
@@ -326,7 +327,7 @@ def _safe_backup(db_path=None):
 def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
               setup=None, touchstone=False, out_root=None, db_path=None,
               exp_name=None, prompt_between=False, metadata=None,
-              backup=True, vna=None, switch=None):
+              position_metadata=None, backup=True, vna=None, switch=None):
     """
     Measure each entry in `positions` and save it as a QCoDeS run -- and,
     with touchstone=True, as a Touchstone file too. Returns the run ids.
@@ -386,6 +387,12 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
     become columns in the database's runs table, so keep them short,
     lowercase and consistent. None values are skipped.
 
+    `position_metadata` is the same, but for one position only: a dict
+    keyed by the entries of `positions` (2, "ALL_OPEN", ...), each mapping
+    to a dict merged into that position's run on top of `metadata`. It's
+    how run_ecal_set tags the channel a short or load is on:
+    {2: {"termination": "short"}}. Positions not in it get nothing extra.
+
     Returns the list of run ids, in the order measured -- what
     plots.plot_sweep, read_db.load_run and read_db.export_touchstone take:
 
@@ -402,6 +409,12 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
     """
     if n_ports not in (1, 2):
         raise ValueError(f"n_ports must be 1 or 2, got {n_ports!r}")
+    positions = list(positions)
+    position_metadata = dict(position_metadata or {})
+    stray = [k for k in position_metadata if k not in positions]
+    if stray:
+        # A typo'd key would otherwise tag nothing, silently.
+        raise ValueError(f"position_metadata has keys that aren't in positions: {stray!r}")
 
     vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
     switch = _resolve_instrument(switch, DEFAULT_SWITCH_NAME, "switch")
@@ -459,6 +472,7 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
             temp_str=temp_str,
             **vna_state,
             **(metadata or {}),
+            **position_metadata.get(entry, {}),
         )
         print(f"  recorded run #{dataset.run_id} in {db_path.name}")
         run_ids.append(dataset.run_id)
@@ -539,9 +553,26 @@ def _leave_switch_open(switch, vna):
               f"({type(e).__name__}: {e})")
 
 
+def _check_terminations(terminations):
+    """
+    Validate run_ecal_set's `terminations` and return it as a fresh
+    {channel: description} dict sorted by channel (None stays None).
+    """
+    if terminations is None:
+        return None
+    out = {}
+    for ch, what in dict(terminations).items():
+        if isinstance(ch, bool) or not isinstance(ch, int) or ch not in range(1, 7):
+            raise ValueError(f"terminations keys must be RF channel numbers 1-6, got {ch!r}")
+        if not isinstance(what, str) or not what.strip():
+            raise ValueError(f"terminations[{ch}] must be a non-empty description, got {what!r}")
+        out[ch] = what.strip()
+    return dict(sorted(out.items()))
+
+
 def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6),
-                 repeats=1, mxc_temp_k=None, note=None, setup="ecal",
-                 touchstone=False, out_root=None, db_path=None,
+                 repeats=1, mxc_temp_k=None, note=None, terminations=None,
+                 setup="ecal", touchstone=False, out_root=None, db_path=None,
                  vna=None, switch=None):
     """
     Measure one complete e-cal set: raw S11 of the switch's internal
@@ -582,6 +613,19 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
         ecal_role     "before", "port" or "after"
         mxc_temp_k    if given -- the mixing-chamber reading at the time
         ecal_note     if given
+        ecal_terminations  if `terminations` given -- see below
+        termination   on each channel's run, if `terminations` given
+
+    `terminations` says what's screwed onto each RF connector, as
+    {channel: description}, e.g. {2: "short", 5: "load"}. With it, each
+    measured channel's run is tagged termination="short" (etc.), and a
+    channel left out of the dict is tagged termination="none", meaning
+    nothing is attached -- so list every port that has something on it.
+    The whole dict is also stored on every run in the set, standards
+    included, as ecal_terminations (JSON text, e.g. '{"2": "short",
+    "5": "load"}'), so the port setup can be read off any run. A port can
+    be listed even if this set doesn't measure it. Leave it as None and
+    nothing about terminations is recorded, as before.
 
     and filed like any sweep, under the group "<setup>_uncal" (default
     "ecal_uncal"). Runs from several sets on the same date/temp share an
@@ -595,7 +639,7 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
     ecal.drift take directly (or look it up later with ecal.find_set):
 
         {"set": "20261015T141502.318", "switch_serials": ..., "date_str": ...,
-         "temp_str": ..., "repeats": [
+         "temp_str": ..., "terminations": {2: "short", 5: "load"}, "repeats": [
              {"before": {"ALL_OPEN": 101, "INTERNAL_SHORT": 102, ...},
               "ports":  {1: 104, 2: 105, ...},
               "after":  {"ALL_OPEN": 110, ...}},
@@ -608,6 +652,7 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
         raise ValueError(f"channels has duplicates: {channels!r}")
     if int(repeats) != repeats or repeats < 1:
         raise ValueError(f"repeats must be a positive integer, got {repeats!r}")
+    terminations = _check_terminations(terminations)
 
     vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
     switch = _resolve_instrument(switch, DEFAULT_SWITCH_NAME, "switch")
@@ -624,8 +669,15 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
     # backup=False: one backup for the whole set (below), not one per block.
     common = dict(setup=setup, touchstone=touchstone, out_root=out_root,
                   db_path=db_path, backup=False, vna=vna, switch=switch)
-    tags = {"ecal_set": set_id, "mxc_temp_k": mxc_temp_k, "ecal_note": note}
+    tags = {"ecal_set": set_id, "mxc_temp_k": mxc_temp_k, "ecal_note": note,
+            "ecal_terminations": (json.dumps({str(ch): t for ch, t in terminations.items()})
+                                  if terminations is not None else None)}
+    port_tags = ({ch: {"termination": terminations.get(ch, "none")} for ch in channels}
+                 if terminations is not None else {})
     print(f"E-cal set {set_id}: {repeats} repeat(s), channels {channels}")
+    if terminations is not None:
+        print("  on the RF ports: " + ", ".join(
+            f"RF{ch}={port_tags[ch]['termination']}" for ch in channels))
 
     repeats_out = []
     try:
@@ -638,7 +690,9 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
                             ecal_role="port" if role == "ports" else role)
                 print(f"-- repeat {k}/{repeats}: {role}")
                 ids = run_oneport_sweep(positions, date_str, temp_str, switch_serials,
-                                        metadata=meta, **common)
+                                        metadata=meta,
+                                        position_metadata=port_tags if role == "ports" else None,
+                                        **common)
                 block[role] = dict(zip(positions, ids))
             repeats_out.append(block)
     finally:
@@ -648,4 +702,5 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
 
     print(f"E-cal set {set_id} complete.")
     return {"set": set_id, "switch_serials": switch_serials, "date_str": date_str,
-            "temp_str": temp_str, "repeats": repeats_out}
+            "temp_str": temp_str, "terminations": terminations or {},
+            "repeats": repeats_out}
