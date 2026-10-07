@@ -21,6 +21,7 @@ up (`../../CLAUDE.md`) for how I want you to work.
 - `measurements/vna_measure.py` (measure, returns numpy), `sweep_db.py` (save
   to QCoDeS db), `read_db.py` (read db with sqlite3 + numpy only),
   `plots.py`, `twoport_sweep.ipynb`, `oneport_sweep.ipynb`, `LAB_SETUP.md`.
+  `measurements/FIRST_COOLDOWN.md`: the why and what-to-expect for the first cooldown (known short + load on RF ports, warm and 3 K e-cal sets, stuck check, scoring); its code is section F of `mm4250_sweeps.ipynb`.
 - `measurements/figures/<serial>/<date>/<temp>/`: slide figure sets, each with a `make_figures.py` that rebuilds them.
   `figures/NIST_comparison/295K/` is the Sep 11 vs NIST tier-2 comparison (report figure). Scripts that need the NIST repo
   or the Sep 11 CSVs are laptop-only and exit with a message if the data is missing.
@@ -56,7 +57,7 @@ up (`../../CLAUDE.md`) for how I want you to work.
 
 ## Current status (update this section; keep it short)
 
-_Last updated: 2026-10-04_
+_Last updated: 2026-10-06_
 
 - `main`: driver, 1-port and 2-port sweeps, db layer, plots, finalized driver + tests,
   `ecal.py` + tests, single `mm4250_sweeps.ipynb` for all sweeps (what I want long term),
@@ -68,6 +69,7 @@ _Last updated: 2026-10-04_
 - Finalized driver HID hardening + DAQ hardware check: PR #7 merged 2026-10-04. Passes the hardware-free tests;
   not yet run on the real board (`measurements/FINALIZED_DRIVER_DAQ_CHECKS.md`).
 - `CLAUDE.md` is tracked and public on GitHub (decided 2026-10-01). Keep secrets and tokens out of it.
+- `run_ecal_set(terminations={2: "short", 5: "load"})` records what's on each RF port (per-run `termination`, set-wide `ecal_terminations` JSON; carried into `find_set`/`correct_set`/`plot_ecal`), via a new `run_sweep(position_metadata=...)`. Tests pass; committed 2026-10-07 on branch `ecal-terminations-first-cooldown` (not pushed or merged), not yet run on hardware.
 - Not done: calibration/de-embedding in software (old SOL pipeline is in `../Archive/mm4250-switch-sweep-prior/`).
 - TODO, later (leave until I ask): run everything neatly from the main notebook,
   with data saved to a specific or user-selected location. Today the `.db`,
