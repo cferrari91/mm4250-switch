@@ -8,7 +8,8 @@ vna_measure directly.
 One core sweep handles both port counts; run_oneport_sweep and
 run_twoport_sweep are thin wrappers that differ only in how many
 S-parameters they ask for. run_ecal_set builds a fridge e-cal set out of
-1-port sweeps (see its docstring, and ecal.py for the correction). Each position measured is saved as
+those sweeps (see its docstring, and ecal.py for the correction), and
+run_kit_set measures an external cal kit for ecal.make_ideals. Each position measured is saved as
 
     a QCoDeS run named "<position>" in a shared .db file        (always)
     Sweeps/<switch_serials>/<date_str>/<temp_str>/<group>/<position>_run<id>.s1p (or .s2p)
@@ -323,9 +324,35 @@ def _safe_backup(db_path=None):
               "the database itself is fine -- run backup_db() by hand")
 
 
+def _check_labels(labels, positions):
+    """
+    Validate `labels`, a {position: text} dict saying what's on each
+    position (e.g. {1: "resonator", 4: "50 ohm load"}), against the
+    positions about to be measured. Returns a clean copy: text stripped,
+    blank entries dropped. Raises before anything is measured, so a typo
+    can't leave half a sweep labelled.
+    """
+    if not labels:
+        return {}
+    if not hasattr(labels, "items"):
+        raise TypeError("labels must be a dict like {1: 'resonator'}, "
+                        f"got {type(labels).__name__}")
+    positions = list(positions)
+    out = {}
+    for pos, text in labels.items():
+        if pos not in positions:
+            raise ValueError(f"labels has {pos!r}, which isn't one of the positions "
+                             f"being measured ({positions})")
+        if not isinstance(text, str):
+            raise TypeError(f"label for {pos!r} must be text, got {text!r}")
+        if text.strip():
+            out[pos] = text.strip()
+    return out
+
+
 def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
               setup=None, touchstone=False, out_root=None, db_path=None,
-              exp_name=None, prompt_between=False, metadata=None,
+              exp_name=None, prompt_between=False, metadata=None, labels=None,
               backup=True, vna=None, switch=None):
     """
     Measure each entry in `positions` and save it as a QCoDeS run -- and,
@@ -386,6 +413,13 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
     become columns in the database's runs table, so keep them short,
     lowercase and consistent. None values are skipped.
 
+    `labels` says what's on individual positions, e.g.
+    {1: "resonator", 2: "SNTJ", "ALL_OPEN": "isolation"}. Each label is
+    saved only on that position's run, as `dut_label` (read_db.list_runs
+    shows it). Positions you leave out, or give "", get no label. A key
+    that isn't in `positions` is an error, raised before anything is
+    measured.
+
     Returns the list of run ids, in the order measured -- what
     plots.plot_sweep, read_db.load_run and read_db.export_touchstone take:
 
@@ -402,6 +436,8 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
     """
     if n_ports not in (1, 2):
         raise ValueError(f"n_ports must be 1 or 2, got {n_ports!r}")
+    positions = list(positions)
+    labels = _check_labels(labels, positions)
 
     vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
     switch = _resolve_instrument(switch, DEFAULT_SWITCH_NAME, "switch")
@@ -422,11 +458,13 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
     run_ids = []
     for entry in positions:
         label, channel, state = _position(entry)
+        dut_label = labels.get(entry)
+        shown = f"{label} ({dut_label})" if dut_label else label
 
         if prompt_between:
-            input(f"Ready to measure {label}? Set up the connections, then press Enter...")
+            input(f"Ready to measure {shown}? Set up the connections, then press Enter...")
 
-        print(f"Measuring {label}...")
+        print(f"Measuring {shown}...")
         if n_ports == 2:
             freq_hz, data = measure_2port(channel, state=state, vna=vna, switch=switch)
         else:
@@ -457,6 +495,7 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
             switch_serials=switch_serials,
             date_str=date_str,
             temp_str=temp_str,
+            dut_label=dut_label,
             **vna_state,
             **(metadata or {}),
         )
@@ -539,21 +578,54 @@ def _leave_switch_open(switch, vna):
               f"({type(e).__name__}: {e})")
 
 
+def _check_correction(vna, vna_cal, what):
+    """
+    For run_ecal_set/run_kit_set: the VNA's correction has to be what the
+    caller said it would be -- off by default, on only with vna_cal=True --
+    so a cal set left active by another section can't slip in unnoticed,
+    and vna_cal=True can't quietly measure raw.
+    """
+    state = _cal_state(vna)
+    if state == "cal" and not vna_cal:
+        raise RuntimeError(
+            f"VNA correction is ON. {what} is measured raw by default -- turn it off "
+            "with ksvna.write('SENS:CORR:CSET:DEAC'), or pass vna_cal=True to keep "
+            "the VNA's cal on underneath on purpose."
+        )
+    if state == "uncal" and vna_cal:
+        raise RuntimeError(
+            "vna_cal=True but VNA correction is OFF -- activate the cal set first "
+            "(ksvna.write(f'SENS:CORR:CSET:ACT \"{CAL_SET}\",0')), or pass vna_cal=False."
+        )
+
+
 def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6),
-                 repeats=1, mxc_temp_k=None, note=None, setup="ecal",
-                 touchstone=False, out_root=None, db_path=None,
+                 repeats=1, mxc_temp_k=None, note=None, labels=None, n_ports=2,
+                 vna_cal=False, setup="ecal", touchstone=False, out_root=None, db_path=None,
                  vna=None, switch=None):
     """
-    Measure one complete e-cal set: raw S11 of the switch's internal
-    standards, then of each RF channel, then of the standards again.
-    ecal.correct_set() turns a set into calibrated S11 at each channel's
-    SMA connector.
+    Measure one complete e-cal set: the raw switch's internal standards,
+    then each RF channel, then the standards again. ecal.correct_set()
+    turns a set into calibrated S11 at each channel's SMA connector.
 
-        cal = run_ecal_set("20261015", "3K", "SN0077", repeats=2, mxc_temp_k=3.2)
-        result = ecal.correct_set(cal, ideals_dir)
+        cal = run_ecal_set("20261015", "3K", "SN0077", repeats=2, mxc_temp_k=3.2,
+                           channels=[1, 4], labels={1: "resonator", 4: "50 ohm load"})
+        result = ecal.correct_set(cal, ideals_dir, sparam="S21")
 
-    One call per temperature. Everything is 1-port S11 on VNA port 1,
-    which has to reach the switch's RFC port.
+    `labels` says what's on each channel: {channel: text}. Each label is
+    saved on that channel's runs only (as `dut_label`), comes back with
+    ecal.find_set, and shows in ecal.plot_ecal's legend as
+    "RF1 (resonator)". Channels you leave out, or give "", are unlabelled.
+    Every key has to be one of `channels`; that's checked before anything
+    is measured. `note` is for what applies to the whole set (fridge
+    state, wiring, why you took it).
+
+    One call per temperature. `n_ports=2` (the default) saves all four
+    S-parameters at every position, for the fridge's circulator wiring:
+    VNA port 1 -> circulator -> RFC, the reflection back up to VNA port 2,
+    so the switch's reflection is S21. `n_ports=1` saves S11 only, for a
+    single line from VNA port 1 to RFC. Which trace gets corrected is
+    chosen afterwards, in ecal.correct_set(sparam=...).
 
     Order, for each repeat:
 
@@ -569,11 +641,18 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
     -- NIST found repeatability dominated their uncertainty, so 2 is worth
     the extra minute.
 
-    VNA correction must be OFF. The e-cal replaces the VNA's own cal
-    (which only reaches the room-temperature cable ends anyway), so this
-    refuses to run with a cal set active rather than stack one on the
-    other. Don't change setup_sweep settings during a set; every run in it
-    has to share one frequency axis.
+    VNA correction is OFF by default, and this refuses to run with a cal
+    set active: the e-cal replaces the VNA's own cal (which only reaches
+    wherever its kit was attached -- the cable ends), so it isn't needed.
+    `vna_cal=True` measures with the VNA's cal on underneath instead (and
+    refuses if it's off). The e-cal result should come out the same either
+    way -- the VNA-corrected trace has the same 3-term form, just with the
+    cables already removed -- but it lets you compare "VNA cal only" with
+    "VNA cal + e-cal". The cal set's frequency settings have to match
+    setup_sweep, or the VNA interpolates it or turns it off. The runs are
+    filed under "<setup>_cal" and record vna_correction_enabled = 1, which
+    ecal.correct_set reads back. Don't change setup_sweep settings during
+    a set; every run in it has to share one frequency axis.
 
     Every run is tagged in the database with:
 
@@ -582,6 +661,7 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
         ecal_role     "before", "port" or "after"
         mxc_temp_k    if given -- the mixing-chamber reading at the time
         ecal_note     if given
+        dut_label     channel runs only, if that channel has a label
 
     and filed like any sweep, under the group "<setup>_uncal" (default
     "ecal_uncal"). Runs from several sets on the same date/temp share an
@@ -595,7 +675,7 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
     ecal.drift take directly (or look it up later with ecal.find_set):
 
         {"set": "20261015T141502.318", "switch_serials": ..., "date_str": ...,
-         "temp_str": ..., "repeats": [
+         "temp_str": ..., "labels": {1: "resonator", ...}, "repeats": [
              {"before": {"ALL_OPEN": 101, "INTERNAL_SHORT": 102, ...},
               "ports":  {1: 104, 2: 105, ...},
               "after":  {"ALL_OPEN": 110, ...}},
@@ -608,24 +688,23 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
         raise ValueError(f"channels has duplicates: {channels!r}")
     if int(repeats) != repeats or repeats < 1:
         raise ValueError(f"repeats must be a positive integer, got {repeats!r}")
+    if n_ports not in (1, 2):
+        raise ValueError(f"n_ports must be 1 or 2, got {n_ports!r}")
+    labels = _check_labels(labels, channels)
 
     vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
     switch = _resolve_instrument(switch, DEFAULT_SWITCH_NAME, "switch")
 
-    if _cal_state(vna) == "cal":
-        raise RuntimeError(
-            "VNA correction is ON. An e-cal set has to be measured raw -- turn "
-            "it off with ksvna.write('SENS:CORR:CSET:DEAC') and run again."
-        )
+    _check_correction(vna, vna_cal, "An e-cal set")
 
     # To the millisecond: two sets started within the same second (a quick
     # re-run) must not share an id, or find_set would merge them.
     set_id = datetime.now().strftime("%Y%m%dT%H%M%S.%f")[:-3]
-    # backup=False: one backup for the whole set (below), not one per block.
-    common = dict(setup=setup, touchstone=touchstone, out_root=out_root,
-                  db_path=db_path, backup=False, vna=vna, switch=switch)
     tags = {"ecal_set": set_id, "mxc_temp_k": mxc_temp_k, "ecal_note": note}
-    print(f"E-cal set {set_id}: {repeats} repeat(s), channels {channels}")
+    print(f"E-cal set {set_id}: {repeats} repeat(s), channels {channels}, {n_ports}-port"
+          + (", VNA cal ON underneath" if vna_cal else ""))
+    for ch, text in labels.items():
+        print(f"  RF{ch}: {text}")
 
     repeats_out = []
     try:
@@ -637,8 +716,12 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
                 meta = dict(tags, ecal_repeat=k,
                             ecal_role="port" if role == "ports" else role)
                 print(f"-- repeat {k}/{repeats}: {role}")
-                ids = run_oneport_sweep(positions, date_str, temp_str, switch_serials,
-                                        metadata=meta, **common)
+                # backup=False: one backup for the whole set (below), not one per block.
+                ids = run_sweep(positions, date_str, temp_str, switch_serials,
+                                n_ports=n_ports, setup=setup, touchstone=touchstone,
+                                out_root=out_root, db_path=db_path, metadata=meta,
+                                labels=labels if role == "ports" else None,
+                                backup=False, vna=vna, switch=switch)
                 block[role] = dict(zip(positions, ids))
             repeats_out.append(block)
     finally:
@@ -648,4 +731,94 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
 
     print(f"E-cal set {set_id} complete.")
     return {"set": set_id, "switch_serials": switch_serials, "date_str": date_str,
-            "temp_str": temp_str, "repeats": repeats_out}
+            "temp_str": temp_str, "labels": dict(labels), "repeats": repeats_out}
+
+
+# The external cal kit's standards, in the order run_kit_set asks for them.
+KIT_STANDARDS = ("open", "short", "load")
+
+
+def run_kit_set(date_str, temp_str, switch_serials, channels=(1,), note=None, n_ports=2,
+                vna_cal=False, setup="kit", touchstone=False, out_root=None, db_path=None,
+                vna=None, switch=None):
+    """
+    Measure what ecal.make_ideals needs to build your own switch's
+    definitions of its internal standards (instead of NIST's, which are
+    for their switch): the internal standards, then an external cal kit's
+    open, short and load on each channel's RF connector, then the internal
+    standards again. Warm only -- it needs hands on the connectors.
+
+        kit = run_kit_set(date_str, "295K", "SN0077", channels=[1])
+        my_ideals = ecal.make_ideals(kit)
+        result = ecal.correct_set(cal, my_ideals, sparam="S21")
+
+    Before each kit standard it opens every channel and waits for you to
+    put that standard on the channel's connector and press Enter. Whatever
+    is normally on the channel (the resonator, say) comes off for this and
+    goes back on afterwards; the definitions belong to the switch alone,
+    so the e-cal set can be taken before or after, with any wiring outside
+    the switch.
+
+    Same rules as run_ecal_set: VNA correction OFF unless vna_cal=True
+    (refuses otherwise; the definitions come out the same either way),
+    keep setup_sweep fixed for the whole set, and the switch is left
+    ALL_OPEN even if it dies partway. `n_ports` as in run_ecal_set (2 for
+    the circulator wiring). Runs are tagged with
+    kit_set (one id per call), kit_role ("before", "kit" or "after"),
+    kit_std on the kit runs, kit_note if given, and dut_label "kit open"
+    etc. on the kit runs, and filed under the group "<setup>_uncal"
+    ("<setup>_cal" with vna_cal=True).
+
+    Returns the set (ecal.find_kit_set rebuilds it later):
+
+        {"set": "20261015T141502.318", "switch_serials": ..., "date_str": ...,
+         "temp_str": ...,
+         "before": {"ALL_OPEN": 101, "INTERNAL_SHORT": 102, "INTERNAL_LOAD": 103},
+         "kit":    {1: {"open": 104, "short": 105, "load": 106}, ...},
+         "after":  {"ALL_OPEN": 107, ...}}
+    """
+    channels = list(channels)
+    if not channels or any(c not in range(1, 7) for c in channels):
+        raise ValueError(f"channels must be a non-empty subset of 1-6, got {channels!r}")
+    if len(set(channels)) != len(channels):
+        raise ValueError(f"channels has duplicates: {channels!r}")
+    if n_ports not in (1, 2):
+        raise ValueError(f"n_ports must be 1 or 2, got {n_ports!r}")
+
+    vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
+    switch = _resolve_instrument(switch, DEFAULT_SWITCH_NAME, "switch")
+    _check_correction(vna, vna_cal, "A kit set")
+
+    set_id = datetime.now().strftime("%Y%m%dT%H%M%S.%f")[:-3]
+    tags = {"kit_set": set_id, "kit_note": note}
+    print(f"Kit set {set_id}: channels {channels}, {n_ports}-port")
+    out = {"set": set_id, "switch_serials": switch_serials, "date_str": date_str,
+           "temp_str": temp_str, "before": {}, "kit": {}, "after": {}}
+
+    def sweep(positions, role, std=None):
+        # backup=False: one backup for the whole set (below).
+        return run_sweep(positions, date_str, temp_str, switch_serials, n_ports=n_ports,
+                         setup=setup, touchstone=touchstone, out_root=out_root,
+                         db_path=db_path, metadata=dict(tags, kit_role=role, kit_std=std),
+                         labels={positions[0]: f"kit {std}"} if std else None,
+                         backup=False, vna=vna, switch=switch)
+
+    try:
+        print("-- internal standards (before)")
+        out["before"] = dict(zip(ECAL_STANDARDS, sweep(list(ECAL_STANDARDS), "before")))
+        for ch in channels:
+            out["kit"][ch] = {}
+            for std in KIT_STANDARDS:
+                _select(state="ALL_OPEN", switch=switch, vna=vna)   # swap with every channel open
+                input(f"Put the kit {std} on RF{ch}'s connector, then press Enter...")
+                (run_id,) = sweep([ch], "kit", std)
+                out["kit"][ch][std] = run_id
+        print("-- internal standards (after)")
+        out["after"] = dict(zip(ECAL_STANDARDS, sweep(list(ECAL_STANDARDS), "after")))
+    finally:
+        _leave_switch_open(switch, vna)
+        _safe_backup(db_path)
+
+    print(f"Kit set {set_id} complete. Put back whatever goes on "
+          f"RF{', RF'.join(str(c) for c in channels)}.")
+    return out
