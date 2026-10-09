@@ -8,12 +8,16 @@ failed connect, `serial_number=`) has not run on the real board yet. The
 
 ## 1. Copy the files to the DAQ
 
-Copy these two files into the DAQ folder
-(`C:\Users\QTSF_DAQ\Measuring_scripts\QCoDeS-Measurement-Framework\Users\Charlie_Ferrari\`),
-keeping `drivers/` and `tests/` side by side:
+Put them in their own subfolder,
+`C:\Users\QTSF_DAQ\Measuring_scripts\QCoDeS-Measurement-Framework\Users\Charlie_Ferrari\finalized_driver_check\`,
+keeping `drivers/` and `tests/` side by side inside it:
 
 - `drivers/MM4250_finalized.py`
 - `tests/hardware_check_MM4250_finalized.py`
+
+Not directly in `Users\Charlie_Ferrari\`: the notebook imports from the first
+`drivers\` folder it finds walking up from itself, so a `drivers\` there would
+hide the framework's and break `from drivers.KeysightVNA_driver import ...`.
 
 If they end up somewhere else, pass the driver path explicitly with
 `--driver <path to MM4250_finalized.py>`.
@@ -26,9 +30,10 @@ If they end up somewhere else, pass the driver path explicitly with
 
 ## 3. Run it
 
-In a terminal with `QTSF_QCoDeS_env` active:
+In a terminal with `QTSF_QCoDeS_env` active, from the `tests\` folder:
 
 ```
+cd C:\Users\QTSF_DAQ\Measuring_scripts\QCoDeS-Measurement-Framework\Users\Charlie_Ferrari\finalized_driver_check\tests
 python hardware_check_MM4250_finalized.py
 ```
 

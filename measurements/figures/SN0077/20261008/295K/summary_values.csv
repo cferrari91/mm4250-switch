@@ -1,0 +1,5 @@
+trace,dip_freq_MHz,dip_depth_dB,offres_level_dB,half_depth_width_MHz,leftover_2way_delay_ns,leftover_2way_loss_dB
+raw S21,549.07,-13.1002,-4.23689,5.85,,
+VNA cal (resonator alone),548.649,-20.7989,-0.291022,4.02402,,
+"de-embedded, NIST",548.8,-20.78,-0.4444,4.14,1.45,-0.206
+"de-embedded, perfect",548.29,-24.04,-1.451,3.57,1.93,-1.17

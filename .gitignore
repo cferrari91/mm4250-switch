@@ -10,3 +10,9 @@ db_backups/
 *.db
 *.db-wal
 *.db-shm
+
+# Q-factor fit work: kept local for now (2026-10-08)
+measurements/fit_resonator_q.py
+measurements/q_*.ipynb
+measurements/figures/**/*q_fit*
+measurements/figures/**/*qfit*

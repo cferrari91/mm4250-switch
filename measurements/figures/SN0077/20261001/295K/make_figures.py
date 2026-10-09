@@ -45,7 +45,8 @@ import ecal                                              # noqa: E402
 from read_db import load_run                             # noqa: E402
 
 SET = "20261001T134108.938"
-DB = USER / "mm4250_sweeps.db"
+# The laptop database these runs live in, archived 2026-10-08 when the DAQ's became mm4250_sweeps.db.
+DB = USER / "db_backups" / "mm4250_sweeps_laptop_through_20261001.db"
 SEP25 = USER / "Sweeps" / "SN0077" / "20260925" / "295K"
 
 C = {1: "#2a78d6", 2: "#eb6834", 3: "#1baf7a", 4: "#eda100", 5: "#e87ba4", 6: "#008300"}

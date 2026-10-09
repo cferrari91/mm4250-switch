@@ -134,7 +134,8 @@ def list_runs(db_path=None):
         {"run_id": 43, "experiment": "20260925_295K_SN0077_RF3_cal",
          "name": "RF3", "switch_serials": "SN0077", "date_str": "20260925",
          "temp_str": "295K", "cal": "cal", "n_ports": 2,
-         "touchstone_path": "Sweeps/SN0077/.../RF3_run43.s2p" or None}
+         "touchstone_path": "Sweeps/SN0077/.../RF3_run43.s2p" or None,
+         "dut_label": "resonator" or None}
 
     "cal" comes from the VNA's recorded correction state (None if the
     run predates that being recorded).
@@ -143,7 +144,7 @@ def list_runs(db_path=None):
     try:
         have = _columns(con, "runs")
         wanted = ["switch_serials", "date_str", "temp_str", "n_ports",
-                  "vna_correction_enabled", "touchstone_path"]
+                  "vna_correction_enabled", "touchstone_path", "dut_label"]
         extra = [f"r.{c}" if c in have else "NULL" for c in wanted]
         rows = con.execute(
             f"SELECT r.run_id, e.name, r.name, {', '.join(extra)} "
@@ -152,12 +153,12 @@ def list_runs(db_path=None):
     finally:
         con.close()
     out = []
-    for run_id, exp, name, serials, date, temp, n_ports, corr, tpath in rows:
+    for run_id, exp, name, serials, date, temp, n_ports, corr, tpath, dut in rows:
         out.append({
             "run_id": run_id, "experiment": exp, "name": name,
             "switch_serials": serials, "date_str": date, "temp_str": temp,
             "cal": {1: "cal", 0: "uncal"}.get(corr), "n_ports": n_ports,
-            "touchstone_path": tpath,
+            "touchstone_path": tpath, "dut_label": dut,
         })
     return out
 
