@@ -369,7 +369,10 @@ def list_standard_runs(db_path=None, cooldown=None, standard=None):
          "switch_serials": "SN0077", "date_str": "20261020", "temp_str": "3K",
          "mxc_temp_k": 3.1, "channel": 3, "standard": "open_1", "type": "open",
          "description": ..., "part": ..., "serial": ..., "offset_mm": None,
-         "repeat": 1, "measured_at": "2026-10-20 10:15:07"}
+         "repeat": 1, "role": "port", "measured_at": "2026-10-20 10:15:07"}
+
+    Bench references (sweep_db.run_bench_standards) are listed too, with
+    role "bench" and no set or channel.
 
     Defaults to the calibration database (read_db.default_cal_db_path).
     `cooldown` and `standard` filter. The internal standards measured
@@ -385,7 +388,7 @@ def list_standard_runs(db_path=None, cooldown=None, standard=None):
         cols = ("run_id", "ecal_set", "cooldown", "switch_serials", "date_str", "temp_str",
                 "mxc_temp_k", "channel", "cal_std", "cal_std_type", "cal_std_description",
                 "cal_std_part", "cal_std_serial", "cal_std_offset_mm", "ecal_repeat",
-                "run_timestamp")
+                "run_timestamp", "cal_role")
         sel = ", ".join(c if c in have else "NULL" for c in cols)
         rows = con.execute(f"SELECT {sel} FROM runs WHERE cal_std IS NOT NULL "
                            "ORDER BY run_id").fetchall()
@@ -393,7 +396,7 @@ def list_standard_runs(db_path=None, cooldown=None, standard=None):
         con.close()
     out = []
     for (run_id, set_id, cd, sn, date, temp, mxc, ch, name, kind, desc, part, serial,
-         offset, rep, ts) in rows:
+         offset, rep, ts, role) in rows:
         if cooldown is not None and cd != cooldown:
             continue
         if standard is not None and name != standard:
@@ -402,9 +405,96 @@ def list_standard_runs(db_path=None, cooldown=None, standard=None):
                     "date_str": date, "temp_str": temp, "mxc_temp_k": mxc,
                     "channel": None if ch is None else int(ch), "standard": name,
                     "type": kind, "description": desc, "part": part, "serial": serial,
-                    "offset_mm": offset, "repeat": rep,
+                    "offset_mm": offset, "repeat": rep, "role": role or "port",
                     "measured_at": (datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
                                     if ts else None)})
+    return out
+
+
+def standards_coverage(db_path=None, temp_str=None, verbose=True):
+    """
+    Which known standards have been on which port, per switch and
+    temperature, from list_standard_runs (bench runs are skipped). Building
+    a port's own definitions needs at least 3 different standards on that
+    port at that temperature, so each row says whether it has them:
+
+        [{"switch_serials": "SN0077", "temp_str": "3K", "channel": 1,
+          "standards": ["flat_short", "open_1"], "types": ["open", "short"],
+          "cooldowns": ["CD1", "CD2"], "enough": False}, ...]
+
+    "Different" means different names in the standards file; two entries
+    that are physically the same standard don't count twice in reality, so
+    keep one name per physical part. `temp_str` filters. verbose=True prints
+    a table, with what's missing.
+    """
+    rows = {}
+    for r in list_standard_runs(db_path):
+        if r["channel"] is None or (temp_str is not None and r["temp_str"] != temp_str):
+            continue
+        key = (r["switch_serials"], r["temp_str"], r["channel"])
+        row = rows.setdefault(key, {"standards": set(), "types": set(), "cooldowns": set()})
+        row["standards"].add(r["standard"])
+        row["types"].add(r["type"])
+        if r["cooldown"]:
+            row["cooldowns"].add(r["cooldown"])
+    out = []
+    for (sn, temp, ch), row in sorted(rows.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2])):
+        stds = sorted(row["standards"])
+        out.append({"switch_serials": sn, "temp_str": temp, "channel": ch, "standards": stds,
+                    "types": sorted(t for t in row["types"] if t),
+                    "cooldowns": sorted(row["cooldowns"]), "enough": len(stds) >= 3})
+    if verbose:
+        if not out:
+            print("No standards measured on any port yet.")
+        for r in out:
+            need = "" if r["enough"] else f"  <- needs {3 - len(r['standards'])} more"
+            print(f"{r['switch_serials']} {r['temp_str']:>6} RF{r['channel']}: "
+                  f"{len(r['standards'])} standard(s) {r['standards']} "
+                  f"over {r['cooldowns'] or 'no cooldown label'}{need}")
+    return out
+
+
+def compare_to_bench(result, bench, db_path=None, band=None, verbose=True):
+    """
+    How well the e-cal reproduces known standards: for each port in
+    result["cal_standards"] (a set taken with run_ecal_set(cal_standards=...)),
+    its calibrated S11 against the bench run of the same standard
+    (sweep_db.run_bench_standards: {name: run_id}).
+
+    Returns {channel: {"standard", "median_db", "median_abs_diff",
+    "max_abs_diff", "median_ddb", "median_dphase_deg"}} -- the last two only
+    for a reflective standard (|S11| > 0.5), where dB and phase mean
+    something; for a load, look at the vector difference. `band` = (f_lo,
+    f_hi) in Hz limits the comparison; default the whole set. `db_path` is
+    where the bench runs are (default the calibration database).
+    """
+    db_path = default_cal_db_path() if db_path is None else db_path
+    f = result["freq"]
+    keep = np.ones(len(f), bool) if band is None else (f >= band[0]) & (f <= band[1])
+    out = {}
+    for ch, name in sorted((result.get("cal_standards") or {}).items()):
+        if ch not in result["ports"]:
+            continue
+        g = result["ports"][ch][keep]
+        row = {"standard": name, "median_db": float(np.median(20 * np.log10(np.abs(g))))}
+        if name in (bench or {}):
+            fr, data = load_run(bench[name], db_path)
+            s = data["S11"]
+            ref = np.interp(f[keep], fr, s.real) + 1j * np.interp(f[keep], fr, s.imag)
+            dv = np.abs(g - ref)
+            row.update(median_abs_diff=float(np.median(dv)), max_abs_diff=float(dv.max()))
+            if np.median(np.abs(ref)) > 0.5:
+                row.update(median_ddb=float(np.median(20 * np.log10(np.abs(g / ref)))),
+                           median_dphase_deg=float(np.median(np.angle(g / ref, deg=True))))
+        out[ch] = row
+        if verbose:
+            line = f"RF{ch} ({name}): |S11| median {row['median_db']:+.2f} dB"
+            if "median_abs_diff" in row:
+                line += (f"; vs bench |dS11| median {row['median_abs_diff']:.3g}, "
+                         f"max {row['max_abs_diff']:.3g}")
+            if "median_ddb" in row:
+                line += f"; {row['median_ddb']:+.2f} dB, {row['median_dphase_deg']:+.1f} deg"
+            print(line)
     return out
 
 

@@ -26,7 +26,7 @@ All six live in this repo's `measurements/` folder:
 (`twoport_sweep.ipynb` and `oneport_sweep.ipynb` still work but are
 superseded by `mm4250_sweeps.ipynb`; no need to copy them.)
 
-**For the fridge e-cal (section D) also copy NIST's standard
+**For the fridge e-cal (sections F and G) also copy NIST's standard
 definitions**, as folders beside the notebook:
 
 | From (on the laptop) | To (beside the notebook) |
@@ -145,12 +145,17 @@ matter:
   [Calibrated sweeps](#calibrated-sweeps) below.
 - **C. Cal vs. uncal** -- one channel measured with the cal set on, then
   off.
-- **D. Fridge e-cal** -- D1 `run_ecal_set(...)` measures one set (the
-  internal standards, every channel, the standards again, `repeats`
-  times) with correction off; D2 corrects it with NIST's definitions and
-  plots calibrated S11 at each channel's connector. One set per
-  temperature.
 - **E. Browse and plot** -- any runs from any session.
+- **F. DUTs in the fridge** -- F2 `run_ecal_set(...)` measures one set (the
+  internal standards, every DUT channel, the standards again, `repeats`
+  times) with correction off; F3 corrects it with NIST's definitions and
+  plots calibrated S11 at each channel's connector. One set per
+  temperature. Also the stuck check (F1) and ALL_OPEN before any
+  temperature change (F4).
+- **G. Switch internal calibration** -- your own definitions from a cal
+  kit (warm), known standards left on ports through a cooldown, the
+  bench reference and scoring, and what's been collected so far. Writes
+  to its own database under `Sweeps\calibration\`.
 
 Also there: **Check the VNA** (cal sets, settings, correction state),
 **Quick look** (one measurement, nothing saved), **Close** (VNA output
@@ -173,7 +178,7 @@ Users\Charlie_Ferrari\
     plots.py
     ecal.py
     mm4250_sweeps.ipynb
-    ideals_3K\  ideals_295K\                       <- NIST definitions, for section D
+    ideals_3K\  ideals_295K\                       <- NIST definitions, for sections F and G
     mm4250_sweeps.db                                 <- every sweep, always
     db_backups\mm4250_sweeps_<YYYYMMDD-HHMMSS>.db   <- snapshot after each sweep and at Close (newest 10 kept)
     Sweeps\<serials>\<date>\<temp>\<setup>_<cal|uncal>\RF<n>_run<id>.s2p   <- only with touchstone=True

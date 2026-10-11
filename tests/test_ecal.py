@@ -785,3 +785,78 @@ def test_cal_standards_with_bad_labels_still_says_why(fridge, caldirs):
     with pytest.raises(TypeError, match="must be a dict"):
         _run_std(fridge, channels=[1], cal_standards={1: "flat_short"}, labels=["x"])
     assert fridge.positions == []
+
+
+# ---------------------------------------------------------------------------
+# Checking definitions against a bench reference, and port coverage
+# ---------------------------------------------------------------------------
+
+def test_kit_set_into_the_calibration_database(fridge, caldirs, monkeypatch):
+    """Notebook G1: kit runs, their files and the definitions all land in Sweeps/calibration/."""
+    cal_dir, cal_db = caldirs
+    monkeypatch.setattr(fridge, "db", cal_db)          # _run_kit passes fridge.db as db_path
+    kit, _ = _run_kit(fridge, monkeypatch, channels=[1], touchstone=True)
+    assert cal_db.is_file()
+    assert list((cal_dir / "SN0077" / "20261015" / "295K" / "kit_uncal").glob("RF1_run*.s2p"))
+    mine = ecal.make_ideals(kit, db_path=cal_db)
+    assert Path(mine).parent == cal_dir and (Path(mine) / "port1_short.s1p").is_file()
+    assert ecal.list_standard_runs(cal_db) == []        # kit runs aren't standards runs
+
+
+def _bench(fridge, monkeypatch, cal_db, values, **kw):
+    """run_bench_standards with a fake VNA reading `values[name]` on its cable."""
+    queue = list(values.items())
+    monkeypatch.setattr(sweep_db, "_cal_state", lambda vna: "cal")
+    monkeypatch.setattr(sweep_db, "instrument_state",
+                        lambda sparams, vna=None: {"vna_correction_enabled": 1})
+    monkeypatch.setattr(sweep_db, "measure_s11",
+                        lambda channel=None, state=None, vna=None, switch=None:
+                        (fridge.freq, queue.pop(0)[1]))
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    return sweep_db.run_bench_standards(list(values), "20261019", standards_file=REGISTRY,
+                                        db_path=cal_db, vna=object(), **kw)
+
+
+def test_bench_reference_and_comparison(fridge, caldirs, monkeypatch, capsys):
+    _, cal_db = caldirs
+    cal = _run_std(fridge, channels=[1, 3], cal_standards={1: "flat_short", 3: "open_1"})
+    result = ecal.correct_set(cal, fridge.ideals_dir, db_path=cal_db)
+    # Bench "truth" = exactly what the fake fridge has on those ports, plus a
+    # small known error on the open.
+    bench = _bench(fridge, monkeypatch, cal_db,
+                   {"flat_short": fridge.dut[1], "open_1": fridge.dut[3] + 0.01})
+    assert sorted(bench) == ["flat_short", "open_1"]
+    rows = {r["standard"]: r for r in ecal.list_standard_runs(cal_db) if r["role"] == "bench"}
+    assert rows["flat_short"]["channel"] is None and rows["flat_short"]["type"] == "short"
+    cmp_ = ecal.compare_to_bench(result, bench, db_path=cal_db)
+    assert cmp_[1]["median_abs_diff"] < 1e-6
+    np.testing.assert_allclose(cmp_[3]["median_abs_diff"], 0.01, atol=1e-6)
+    assert "median_ddb" in cmp_[1]                    # |dut| = 0.9: reflective, so dB/phase too
+    assert "RF3 (open_1)" in capsys.readouterr().out
+
+
+def test_bench_needs_the_vna_cal_on_and_known_names(fridge, caldirs, monkeypatch):
+    _, cal_db = caldirs
+    with pytest.raises(ValueError, match="aren't in the standards file"):
+        sweep_db.run_bench_standards(["nope"], "20261019", standards_file=REGISTRY,
+                                     db_path=cal_db, vna=object())
+    monkeypatch.setattr(sweep_db, "_cal_state", lambda vna: "uncal")
+    with pytest.raises(RuntimeError, match="correction is OFF"):
+        sweep_db.run_bench_standards(["flat_short"], "20261019", standards_file=REGISTRY,
+                                     db_path=cal_db, vna=object())
+    assert not cal_db.exists()
+
+
+def test_coverage_counts_distinct_standards_per_port_and_temperature(fridge, caldirs, capsys):
+    _, cal_db = caldirs
+    _run_std(fridge, channels=[1, 2], cal_standards={1: "flat_short", 2: "open_1"}, cooldown="CD1")
+    _run_std(fridge, channels=[1, 2], cal_standards={1: "open_1", 2: "flat_short"}, cooldown="CD2")
+    _run_std(fridge, channels=[1], cal_standards={1: "offset_60"}, cooldown="CD3")
+    _run_std(fridge, channels=[1], cal_standards={1: "offset_60"}, cooldown="CD3")   # a repeat
+    cov = {r["channel"]: r for r in ecal.standards_coverage(cal_db)}
+    assert cov[1]["standards"] == ["flat_short", "offset_60", "open_1"] and cov[1]["enough"]
+    assert cov[1]["cooldowns"] == ["CD1", "CD2", "CD3"]
+    assert cov[2]["standards"] == ["flat_short", "open_1"] and not cov[2]["enough"]
+    out = capsys.readouterr().out
+    assert "RF2: 2 standard(s)" in out and "needs 1 more" in out
+    assert ecal.standards_coverage(cal_db, temp_str="295K", verbose=False) == []

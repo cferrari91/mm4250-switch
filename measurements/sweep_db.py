@@ -1006,7 +1006,10 @@ def run_kit_set(date_str, temp_str, switch_serials, channels=(1,), note=None, n_
     kit_set (one id per call), kit_role ("before", "kit" or "after"),
     kit_std on the kit runs, kit_note if given, and dut_label "kit open"
     etc. on the kit runs, and filed under the group "<setup>_uncal"
-    ("<setup>_cal" with vna_cal=True).
+    ("<setup>_cal" with vna_cal=True). With db_path pointing at the
+    calibration database (read_db.default_cal_db_path(), notebook G1),
+    touchstone files go under Sweeps/calibration/ too, and make_ideals
+    writes the definitions beside that database.
 
     Returns the set (ecal.find_kit_set rebuilds it later):
 
@@ -1027,6 +1030,8 @@ def run_kit_set(date_str, temp_str, switch_serials, channels=(1,), note=None, n_
     vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
     switch = _resolve_instrument(switch, DEFAULT_SWITCH_NAME, "switch")
     _check_correction(vna, vna_cal, "A kit set")
+    if out_root is None and db_path is not None:
+        out_root = files_root(db_path)          # files follow the database they belong to
 
     set_id = datetime.now().strftime("%Y%m%dT%H%M%S.%f")[:-3]
     tags = {"kit_set": set_id, "kit_note": note}
@@ -1060,4 +1065,54 @@ def run_kit_set(date_str, temp_str, switch_serials, channels=(1,), note=None, n_
 
     print(f"Kit set {set_id} complete. Put back whatever goes on "
           f"RF{', RF'.join(str(c) for c in channels)}.")
+    return out
+
+
+def run_bench_standards(names, date_str, temp_str="295K", note=None, standards_file=None,
+                        db_path=None, vna=None):
+    """
+    Bench reference for checking definitions (notebook G3): each named
+    standard measured straight on VNA port 1's cable with the VNA's own
+    calibration on, no switch and no circulator, so there's a "truth" to
+    compare the e-cal's result for the same standard against.
+
+        bench = run_bench_standards(["flat_short", "load_1"], date_str)
+        # later: ecal.compare_to_bench(result, bench)
+
+    Prompts before each one. The VNA's correction must be ON (raises
+    otherwise): an uncorrected bench reading isn't a reference. Each run
+    goes into the calibration database (default
+    Sweeps/calibration/mm4250_calibration.db) as S11, tagged cal_std and the
+    standard's details from the standards file, cal_role="bench", and
+    vna_* state like any run. Returns {name: run_id}.
+    """
+    names = list(names)
+    if not names or len(set(names)) != len(names):
+        raise ValueError(f"names must be a non-empty list without repeats, got {names!r}")
+    registry = load_standards(standards_file)
+    unknown = [n for n in names if n not in registry]
+    if unknown:
+        raise ValueError(f"{unknown} aren't in the standards file; known: "
+                         f"{', '.join(sorted(registry))}")
+    vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
+    if _cal_state(vna) != "cal":
+        raise RuntimeError("VNA correction is OFF -- activate the cal for VNA port 1 "
+                           "first; the bench reference has to be calibrated.")
+    db_path = Path(db_path) if db_path is not None else _default_cal_db_path()
+    exp, db_path = _open_experiment("bench", db_path, f"{date_str}_{temp_str}_bench_standards")
+    out = {}
+    try:
+        for name in names:
+            input(f"Put {name} on VNA port 1's cable, then press Enter...")
+            freq_hz, s11 = measure_s11(vna=vna)       # no channel: the switch isn't involved
+            meta = {key: registry[name].get(field) for key, field in _STD_FIELDS}
+            ds = record_measurement(f"{name}_bench", freq_hz, s11, exp, cal_std=name,
+                                    cal_role="bench", date_str=date_str, temp_str=temp_str,
+                                    bench_note=note, **meta,
+                                    **instrument_state(("S11",), vna=vna))
+            out[name] = ds.run_id
+            print(f"  {name}: run #{ds.run_id}")
+            _checkpoint(db_path)
+    finally:
+        _safe_backup(db_path)
     return out
