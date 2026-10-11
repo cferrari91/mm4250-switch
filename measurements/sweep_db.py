@@ -9,7 +9,11 @@ One core sweep handles both port counts; run_oneport_sweep and
 run_twoport_sweep are thin wrappers that differ only in how many
 S-parameters they ask for. run_ecal_set builds a fridge e-cal set out of
 those sweeps (see its docstring, and ecal.py for the correction), and
-run_kit_set measures an external cal kit for ecal.make_ideals. Each position measured is saved as
+run_kit_set measures an external cal kit for ecal.make_ideals.
+run_ecal_set(cal_standards=...) records an e-cal set with known calibration
+standards on the RF ports into the separate calibration database,
+Sweeps/calibration/mm4250_calibration.db -- raw data for building your own
+standard definitions later. Each position measured is saved as
 
     a QCoDeS run named "<position>" in a shared .db file        (always)
     Sweeps/<switch_serials>/<date_str>/<temp_str>/<group>/<position>_run<id>.s1p (or .s2p)
@@ -68,6 +72,7 @@ delay per trace, and so on), so a run can be audited later instead of
 taken on trust.
 """
 
+import json
 import os
 import sqlite3
 from datetime import datetime
@@ -98,8 +103,12 @@ from vna_measure import (
 # same code, and re-exported so `from sweep_db import save_touchstone`
 # keeps working.
 from read_db import (  # noqa: F401
+    CAL_DIR_NAME,
     DEFAULT_DB_NAME,
     DEFAULT_OUT_DIR_NAME,
+    default_cal_db_path,
+    files_root,
+    load_standards,
     TOUCHSTONE_2PORT_ORDER,
     backup_db,
     save_touchstone,
@@ -120,6 +129,15 @@ def _default_out_root():
     machine's users/<name>/ -- puts the sweeps in that folder too.
     """
     return Path(__file__).resolve().parent / DEFAULT_OUT_DIR_NAME
+
+
+def _default_cal_db_path():
+    """
+    Sweeps/calibration/mm4250_calibration.db beside these files: where
+    run_ecal_set(cal_standards=...) records by default (read_db.default_cal_db_path).
+    Resolved here, like _default_db_path, so tests can point it elsewhere.
+    """
+    return _default_out_root() / CAL_DIR_NAME / Path(default_cal_db_path()).name
 
 
 def _default_db_path():
@@ -324,6 +342,38 @@ def _safe_backup(db_path=None):
               "the database itself is fine -- run backup_db() by hand")
 
 
+def _read_temperature(temp_reader, strict):
+    """
+    One reading from `temp_reader`, as a float in kelvin. strict=True
+    (the check before a sweep starts) raises on any problem; strict=False
+    (mid-sweep) prints a warning and returns None instead, so a flaky
+    thermometer read can't throw away a measurement that already happened.
+    """
+    try:
+        value = temp_reader()
+        if isinstance(value, bool):
+            raise TypeError("got a bool")
+        value = float(value)
+        if not value > 0:
+            raise ValueError(f"got {value!r} K")
+        return value
+    except Exception as e:
+        if strict:
+            raise RuntimeError(f"temp_reader failed before the sweep started "
+                               f"({type(e).__name__}: {e}); nothing was measured") from e
+        print(f"  [warning] temp_reader failed ({type(e).__name__}: {e}); "
+              "saving this run without mxc_temp_k")
+        return None
+
+
+def _checked(temp_reader):
+    """`temp_reader`, marked as already checked so run_sweep doesn't check it again."""
+    def reader():
+        return temp_reader()
+    reader._checked = True
+    return reader
+
+
 def _check_labels(labels, positions):
     """
     Validate `labels`, a {position: text} dict saying what's on each
@@ -353,7 +403,8 @@ def _check_labels(labels, positions):
 def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
               setup=None, touchstone=False, out_root=None, db_path=None,
               exp_name=None, prompt_between=False, metadata=None, labels=None,
-              backup=True, vna=None, switch=None):
+              position_metadata=None, temp_reader=None, backup=True, vna=None,
+              switch=None):
     """
     Measure each entry in `positions` and save it as a QCoDeS run -- and,
     with touchstone=True, as a Touchstone file too. Returns the run ids.
@@ -413,6 +464,23 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
     become columns in the database's runs table, so keep them short,
     lowercase and consistent. None values are skipped.
 
+    `position_metadata` is like `metadata`, but for one position only: a
+    dict keyed by entries of `positions` (2, "ALL_OPEN", ...), each mapping
+    to a dict merged into that position's run on top of `metadata`. It's
+    how run_ecal_set tags the channel a short or a calibration standard is
+    on. A key that isn't in `positions` is an error, raised before anything
+    is measured.
+
+    `temp_reader` is a function with no arguments that returns the fridge
+    temperature in kelvin (e.g. a thin wrapper around the fridge's QCoDeS
+    driver: `temp_reader=lambda: fridge.mxc_temperature()` -- whatever the
+    driver calls it). It's called once before the sweep starts (so a broken
+    reader fails before the switch moves) and again right before each
+    position, and the reading is saved on that run as `mxc_temp_k`,
+    replacing any mxc_temp_k in `metadata`. If a reading fails partway, the
+    run is saved without one and a warning is printed, rather than losing
+    the measurement.
+
     `labels` says what's on individual positions, e.g.
     {1: "resonator", 2: "SNTJ", "ALL_OPEN": "isolation"}. Each label is
     saved only on that position's run, as `dut_label` (read_db.list_runs
@@ -438,6 +506,13 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
         raise ValueError(f"n_ports must be 1 or 2, got {n_ports!r}")
     positions = list(positions)
     labels = _check_labels(labels, positions)
+    position_metadata = dict(position_metadata or {})
+    stray = [k for k in position_metadata if k not in positions]
+    if stray:
+        # A typo'd key would otherwise tag nothing, silently.
+        raise ValueError(f"position_metadata has keys that aren't in positions: {stray!r}")
+    if temp_reader is not None and not getattr(temp_reader, "_checked", False):
+        _read_temperature(temp_reader, strict=True)     # fail before anything moves
 
     vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
     switch = _resolve_instrument(switch, DEFAULT_SWITCH_NAME, "switch")
@@ -463,6 +538,11 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
 
         if prompt_between:
             input(f"Ready to measure {shown}? Set up the connections, then press Enter...")
+
+        run_meta = dict(metadata or {})
+        run_meta.update(position_metadata.get(entry, {}))
+        if temp_reader is not None:
+            run_meta["mxc_temp_k"] = _read_temperature(temp_reader, strict=False)
 
         print(f"Measuring {shown}...")
         if n_ports == 2:
@@ -497,7 +577,7 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
             temp_str=temp_str,
             dut_label=dut_label,
             **vna_state,
-            **(metadata or {}),
+            **run_meta,
         )
         print(f"  recorded run #{dataset.run_id} in {db_path.name}")
         run_ids.append(dataset.run_id)
@@ -599,10 +679,62 @@ def _check_correction(vna, vna_cal, what):
         )
 
 
+def _check_channel_key(ch, what):
+    if isinstance(ch, bool) or not isinstance(ch, int) or ch not in range(1, 7):
+        raise ValueError(f"{what} keys must be RF channel numbers 1-6, got {ch!r}")
+
+
+def _check_terminations(terminations):
+    """
+    Validate run_ecal_set's `terminations` and return it as a fresh
+    {channel: description} dict sorted by channel (None stays None).
+    """
+    if terminations is None:
+        return None
+    if not hasattr(terminations, "items"):
+        raise ValueError("terminations must be a dict like {2: 'short'}, "
+                         f"got {type(terminations).__name__}")
+    out = {}
+    for ch, what in terminations.items():
+        _check_channel_key(ch, "terminations")
+        if not isinstance(what, str) or not what.strip():
+            raise ValueError(f"terminations[{ch}] must be a non-empty description, got {what!r}")
+        out[ch] = what.strip()
+    return dict(sorted(out.items()))
+
+
+def _check_cal_standards(cal_standards, channels, registry):
+    """
+    Validate run_ecal_set's `cal_standards` ({channel: standard name})
+    against the channels being measured and the standards file. Returns
+    {channel: name} sorted by channel.
+    """
+    if not hasattr(cal_standards, "items") or not cal_standards:
+        raise ValueError("cal_standards must be a non-empty dict like {2: 'flat_short'}")
+    out = {}
+    for ch, name in cal_standards.items():
+        _check_channel_key(ch, "cal_standards")
+        if ch not in channels:
+            raise ValueError(f"cal_standards has RF{ch}, which this set doesn't measure "
+                             f"(channels={channels})")
+        if not isinstance(name, str) or name.strip() not in registry:
+            raise ValueError(f"cal_standards[{ch}] = {name!r} isn't in the standards file; "
+                             f"known: {', '.join(sorted(registry))}")
+        out[ch] = name.strip()
+    return dict(sorted(out.items()))
+
+
+# What each cal standard's run is tagged with, from its standards-file entry.
+_STD_FIELDS = (("cal_std_type", "type"), ("cal_std_description", "description"),
+               ("cal_std_part", "part"), ("cal_std_serial", "serial"),
+               ("cal_std_offset_mm", "offset_mm"))
+
+
 def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6),
-                 repeats=1, mxc_temp_k=None, note=None, labels=None, n_ports=2,
-                 vna_cal=False, setup="ecal", touchstone=False, out_root=None, db_path=None,
-                 vna=None, switch=None):
+                 repeats=1, mxc_temp_k=None, note=None, labels=None, terminations=None,
+                 cal_standards=None, cooldown=None, standards_file=None, temp_reader=None,
+                 n_ports=2, vna_cal=False, setup="ecal", touchstone=False, out_root=None,
+                 db_path=None, vna=None, switch=None):
     """
     Measure one complete e-cal set: the raw switch's internal standards,
     then each RF channel, then the standards again. ecal.correct_set()
@@ -619,6 +751,48 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
     Every key has to be one of `channels`; that's checked before anything
     is measured. `note` is for what applies to the whole set (fridge
     state, wiring, why you took it).
+
+    `terminations` says what's screwed onto each RF connector, as
+    {channel: description}, e.g. {2: "short", 5: "load"}. With it, each
+    measured channel's run is tagged termination="short" (etc.), and a
+    channel left out of the dict is tagged termination="none", meaning
+    nothing is attached -- so list every port that has something on it.
+    The whole dict is also stored on every run in the set, standards
+    included, as ecal_terminations (JSON text, e.g. '{"2": "short",
+    "5": "load"}'), so the port setup can be read off any run. A port can
+    be listed even if this set doesn't measure it. Leave it as None and
+    nothing about terminations is recorded.
+
+    `cal_standards` is for building your own standard definitions, NIST
+    style: {channel: name} of known calibration standards on the RF
+    connectors, e.g. {1: "flat_short", 3: "open_1", 5: "offset_short_60mm"}.
+    Names come from the standards file (`standards_file`, default
+    Sweeps/calibration/standards.json; see read_db.load_standards), and an
+    unknown name is an error before anything moves. With it:
+
+      * the set goes into the calibration database,
+        Sweeps/calibration/mm4250_calibration.db (unless you pass db_path),
+        with its own db_backups/ and, with touchstone=True, its Touchstone
+        files under Sweeps/calibration/<serials>/<date>/<temp>/...;
+      * `cooldown` is required (e.g. "CD1", or "bench" for a warm session),
+        since rotating standards between ports only works if you know which
+        cooldown each set came from;
+      * each standard's channel run is tagged cal_std (the name) plus
+        cal_std_type, cal_std_description, cal_std_part, cal_std_serial and
+        cal_std_offset_mm from the file, and labelled "<name> (<type>)"
+        unless `labels` says otherwise; the full entries are also stored on
+        every run of the set as cal_standards (JSON), so the database stays
+        self-describing even if the file changes later;
+      * the standards count as terminations too (other entries in
+        `terminations`, like {2: "resonator"}, still work alongside).
+
+    ecal.list_standard_runs() lists every such run: which standard, which
+    port, which switch, cooldown, temperature, and when.
+
+    `temp_reader` reads the fridge temperature for you: a function with no
+    arguments returning kelvin (see run_sweep), called before each
+    position and saved on each run as mxc_temp_k. Pass it or `mxc_temp_k`,
+    not both. `cooldown` can be given for any set, not just standards sets.
 
     One call per temperature. `n_ports=2` (the default) saves all four
     S-parameters at every position, for the fridge's circulator wiring:
@@ -662,6 +836,9 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
         mxc_temp_k    if given -- the mixing-chamber reading at the time
         ecal_note     if given
         dut_label     channel runs only, if that channel has a label
+        ecal_terminations, termination     if `terminations` or `cal_standards` given
+        cooldown      if given
+        cal_standards, cal_std, cal_std_*  if `cal_standards` given (see above)
 
     and filed like any sweep, under the group "<setup>_uncal" (default
     "ecal_uncal"). Runs from several sets on the same date/temp share an
@@ -675,7 +852,9 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
     ecal.drift take directly (or look it up later with ecal.find_set):
 
         {"set": "20261015T141502.318", "switch_serials": ..., "date_str": ...,
-         "temp_str": ..., "labels": {1: "resonator", ...}, "repeats": [
+         "temp_str": ..., "labels": {1: "resonator", ...},
+         "terminations": {2: "short", ...}, "cal_standards": {1: "flat_short", ...},
+         "cooldown": "CD1" or None, "repeats": [
              {"before": {"ALL_OPEN": 101, "INTERNAL_SHORT": 102, ...},
               "ports":  {1: 104, 2: 105, ...},
               "after":  {"ALL_OPEN": 110, ...}},
@@ -690,21 +869,78 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
         raise ValueError(f"repeats must be a positive integer, got {repeats!r}")
     if n_ports not in (1, 2):
         raise ValueError(f"n_ports must be 1 or 2, got {n_ports!r}")
+    if mxc_temp_k is not None and temp_reader is not None:
+        raise ValueError("pass mxc_temp_k or temp_reader, not both")
+    if cooldown is not None and (not isinstance(cooldown, str) or not cooldown.strip()):
+        raise ValueError(f"cooldown must be a non-empty label like 'CD1', got {cooldown!r}")
+    cooldown = cooldown.strip() if cooldown else None
+    terminations = _check_terminations(terminations)
+
+    std_names, std_records = {}, {}
+    if cal_standards is not None:
+        if cooldown is None:
+            raise ValueError("cal_standards needs cooldown= (e.g. 'CD1', or 'bench' warm), "
+                             "so each set can be matched to the cooldown it came from")
+        registry = load_standards(standards_file)
+        std_names = _check_cal_standards(cal_standards, channels, registry)
+        std_records = {ch: registry[name] for ch, name in std_names.items()}
+        terminations = dict(terminations or {})
+        for ch, name in std_names.items():
+            if terminations.get(ch, name) != name:
+                raise ValueError(f"RF{ch} is {terminations[ch]!r} in terminations but "
+                                 f"{name!r} in cal_standards")
+            terminations[ch] = name
+        terminations = dict(sorted(terminations.items()))
+        if labels is None or hasattr(labels, "items"):     # anything else: _check_labels says why
+            labels = dict(labels or {})
+            for ch, name in std_names.items():
+                labels.setdefault(ch, f"{name} ({std_records[ch]['type']})")
+        if db_path is None:
+            db_path = _default_cal_db_path()
+        if out_root is None:
+            out_root = files_root(db_path)
     labels = _check_labels(labels, channels)
 
     vna = _resolve_instrument(vna, DEFAULT_VNA_NAME, "VNA")
     switch = _resolve_instrument(switch, DEFAULT_SWITCH_NAME, "switch")
 
     _check_correction(vna, vna_cal, "An e-cal set")
+    if temp_reader is not None:
+        # Check once for the whole set, so a reader that breaks partway
+        # through only costs readings (warnings), never half a set.
+        _read_temperature(temp_reader, strict=True)
+        temp_reader = _checked(temp_reader)
 
     # To the millisecond: two sets started within the same second (a quick
     # re-run) must not share an id, or find_set would merge them.
     set_id = datetime.now().strftime("%Y%m%dT%H%M%S.%f")[:-3]
-    tags = {"ecal_set": set_id, "mxc_temp_k": mxc_temp_k, "ecal_note": note}
+    tags = {"ecal_set": set_id, "mxc_temp_k": mxc_temp_k, "ecal_note": note,
+            "cooldown": cooldown,
+            "ecal_terminations": (json.dumps({str(ch): t for ch, t in terminations.items()})
+                                  if terminations is not None else None),
+            "cal_standards": (json.dumps({str(ch): dict(std_records[ch], name=std_names[ch])
+                                          for ch in std_names})
+                              if std_names else None)}
+    port_tags = {}
+    for ch in channels:
+        t = {}
+        if terminations is not None:
+            t["termination"] = terminations.get(ch, "none")
+        if ch in std_names:
+            t["cal_std"] = std_names[ch]
+            for key, field in _STD_FIELDS:
+                t[key] = std_records[ch].get(field)
+        if t:
+            port_tags[ch] = t
     print(f"E-cal set {set_id}: {repeats} repeat(s), channels {channels}, {n_ports}-port"
-          + (", VNA cal ON underneath" if vna_cal else ""))
-    for ch, text in labels.items():
-        print(f"  RF{ch}: {text}")
+          + (", VNA cal ON underneath" if vna_cal else "")
+          + (f", cooldown {cooldown}" if cooldown else ""))
+    for ch in channels:
+        bits = [x for x in (labels.get(ch), (terminations or {}).get(ch)) if x]
+        if bits:
+            print(f"  RF{ch}: {' / '.join(dict.fromkeys(bits))}")
+    if std_names:
+        print(f"  calibration standards -> {Path(db_path).resolve()}")
 
     repeats_out = []
     try:
@@ -721,7 +957,8 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
                                 n_ports=n_ports, setup=setup, touchstone=touchstone,
                                 out_root=out_root, db_path=db_path, metadata=meta,
                                 labels=labels if role == "ports" else None,
-                                backup=False, vna=vna, switch=switch)
+                                position_metadata=port_tags if role == "ports" else None,
+                                temp_reader=temp_reader, backup=False, vna=vna, switch=switch)
                 block[role] = dict(zip(positions, ids))
             repeats_out.append(block)
     finally:
@@ -731,7 +968,9 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
 
     print(f"E-cal set {set_id} complete.")
     return {"set": set_id, "switch_serials": switch_serials, "date_str": date_str,
-            "temp_str": temp_str, "labels": dict(labels), "repeats": repeats_out}
+            "temp_str": temp_str, "labels": dict(labels),
+            "terminations": dict(terminations or {}), "cal_standards": dict(std_names),
+            "cooldown": cooldown, "repeats": repeats_out}
 
 
 # The external cal kit's standards, in the order run_kit_set asks for them.

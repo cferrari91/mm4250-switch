@@ -367,6 +367,262 @@ def test_run_sweep_labels_a_state_too(fridge):
     assert [by_id[i] for i in ids] == [None, "isolation"]
 
 
+# ---------------------------------------------------------------------------
+# What's on the ports: terminations
+# ---------------------------------------------------------------------------
+
+def _runs_table(db, *cols):
+    """{run_id: (name, col, ...)} straight from the runs table."""
+    import sqlite3
+    con = sqlite3.connect(db)
+    try:
+        rows = con.execute(f"SELECT run_id, name, {', '.join(cols)} FROM runs").fetchall()
+    finally:
+        con.close()
+    return {r[0]: r[1:] for r in rows}
+
+
+def test_terminations_tag_each_port_and_the_whole_set(fridge):
+    import matplotlib
+    matplotlib.use("Agg")
+    cal = _run(fridge, channels=[2, 3, 5], terminations={5: "load", 2: "short"})
+    assert cal["terminations"] == {2: "short", 5: "load"}
+    rows = _runs_table(fridge.db, "termination", "ecal_terminations", "ecal_role")
+    by_name = {name: term for name, term, _, role in rows.values() if role == "port"}
+    assert by_name == {"RF2": "short", "RF3": "none", "RF5": "load"}
+    # The standards carry no per-port tag, but every run carries the set's dict.
+    for name, term, set_json, role in rows.values():
+        assert set_json == '{"2": "short", "5": "load"}'
+        if role != "port":
+            assert term is None
+    # And it all comes back from the database.
+    assert ecal.find_set(None, fridge.db) == cal
+    assert ecal.list_sets(fridge.db)[-1]["terminations"] == {2: "short", 5: "load"}
+    result = ecal.correct_set(None, fridge.ideals_dir, db_path=fridge.db)
+    assert result["terminations"] == {2: "short", 5: "load"}
+    ax_m, _ = ecal.plot_ecal(result)
+    assert [t.get_text() for t in ax_m.get_legend().get_texts()] == \
+        ["RF2 (short)", "RF3", "RF5 (load)"]
+
+
+def test_a_label_wins_over_a_termination_in_the_legend(fridge):
+    import matplotlib
+    matplotlib.use("Agg")
+    _run(fridge, channels=[1, 2], labels={1: "resonator"}, terminations={1: "cable", 2: "short"})
+    result = ecal.correct_set(None, fridge.ideals_dir, db_path=fridge.db)
+    ax_m, _ = ecal.plot_ecal(result)
+    assert [t.get_text() for t in ax_m.get_legend().get_texts()] == \
+        ["RF1 (resonator)", "RF2 (short)"]
+
+
+def test_terminations_can_name_a_port_the_set_skips(fridge):
+    cal = _run(fridge, channels=[1], terminations={6: "short"})
+    assert cal["terminations"] == {6: "short"}
+    rows = _runs_table(fridge.db, "termination")
+    assert [t for name, t in rows.values() if name == "RF1"] == ["none"]
+
+
+def test_no_terminations_records_nothing_new(fridge):
+    cal = _run(fridge)
+    assert cal["terminations"] == {} and cal["cal_standards"] == {} and cal["cooldown"] is None
+    assert ecal.find_set(None, fridge.db) == cal
+    import sqlite3
+    con = sqlite3.connect(fridge.db)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(runs)")}
+    con.close()
+    assert not cols & {"termination", "ecal_terminations", "cal_std", "cal_standards",
+                       "cooldown"}
+
+
+@pytest.mark.parametrize("terms", [{0: "short"}, {7: "load"}, {"2": "short"},
+                                   {True: "short"}, {2: ""}, {2: None}, ["short"]])
+def test_bad_terminations(fridge, terms):
+    with pytest.raises(ValueError, match="terminations"):
+        _run(fridge, terminations=terms)
+    assert fridge.positions == []          # refused before the switch moved
+
+
+def test_position_metadata_rejects_unknown_positions(fridge):
+    with pytest.raises(ValueError, match="position_metadata"):
+        sweep_db.run_oneport_sweep([1, 2], "20261015", "3K", "SN0077", db_path=fridge.db,
+                                   position_metadata={3: {"x": 1}},
+                                   vna=object(), switch=object())
+    assert fridge.positions == []
+
+
+# ---------------------------------------------------------------------------
+# Known calibration standards on the ports -> the calibration database
+# ---------------------------------------------------------------------------
+
+REGISTRY = {
+    "flat_short": {"type": "short", "description": "flush SMA short", "part": "P-1",
+                   "serial": "S1", "offset_mm": 0},
+    "open_1": {"type": "open", "description": "SMA open", "part": "P-2", "serial": "S2"},
+    "offset_60": {"type": "short", "description": "offset short", "offset_mm": 60.0},
+}
+
+
+@pytest.fixture
+def caldirs(fridge, monkeypatch, tmp_path):
+    """Point sweep_db's default Sweeps/ at a temp folder; return the calibration paths."""
+    sweeps = tmp_path / "Sweeps"
+    monkeypatch.setattr(sweep_db, "_default_out_root", lambda: sweeps)
+    return sweeps / "calibration", sweeps / "calibration" / "mm4250_calibration.db"
+
+
+def _run_std(fake, **kw):
+    kw.setdefault("standards_file", REGISTRY)
+    kw.setdefault("cooldown", "CD1")
+    kw.setdefault("repeats", 1)
+    return sweep_db.run_ecal_set("20261020", "3K", "SN0077", vna=object(), switch=object(), **kw)
+
+
+def test_cal_standards_go_to_the_calibration_database(fridge, caldirs):
+    cal_dir, cal_db = caldirs
+    cal = _run_std(fridge, channels=[1, 3, 5], repeats=2,
+                   cal_standards={3: "open_1", 1: "flat_short"},
+                   terminations={5: "resonator"}, mxc_temp_k=3.1, touchstone=True)
+    assert cal_db.is_file() and not fridge.db.exists()           # its own database
+    assert (cal_dir / "db_backups").is_dir()                      # and its own backups
+    assert sorted(p.name for p in (cal_dir / "SN0077" / "20261020" / "3K" / "ecal_uncal")
+                  .glob("RF1_run*.s2p")) != []                    # files beside it too
+    assert cal["cal_standards"] == {1: "flat_short", 3: "open_1"}
+    assert cal["terminations"] == {1: "flat_short", 3: "open_1", 5: "resonator"}
+    assert cal["labels"] == {1: "flat_short (short)", 3: "open_1 (open)"}
+    assert cal["cooldown"] == "CD1"
+    assert ecal.find_set(None, cal_db) == cal
+
+    rows = _runs_table(cal_db, "cal_std", "cal_std_type", "cal_std_part", "cal_std_offset_mm",
+                       "cooldown", "ecal_role")
+    ports = {name: r for name, *r in rows.values() if r[-1] == "port"}
+    assert ports["RF1"][:4] == ["flat_short", "short", "P-1", 0]
+    assert ports["RF3"][:4] == ["open_1", "open", "P-2", None]
+    assert ports["RF5"][0] is None                                # not a standard
+    assert {r[5] for r in rows.values()} == {"CD1"}               # cooldown on every run
+
+    listed = ecal.list_standard_runs(cal_db)
+    assert [(r["standard"], r["channel"], r["repeat"]) for r in listed] == \
+        [("flat_short", 1, 1), ("open_1", 3, 1), ("flat_short", 1, 2), ("open_1", 3, 2)]
+    first = listed[0]
+    assert (first["cooldown"], first["switch_serials"], first["temp_str"], first["mxc_temp_k"],
+            first["type"], first["serial"], first["set"]) == \
+        ("CD1", "SN0077", "3K", 3.1, "short", "S1", cal["set"])
+    import re
+    assert re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d", first["measured_at"])
+    assert ecal.list_standard_runs(cal_db, standard="open_1")[0]["channel"] == 3
+    assert ecal.list_standard_runs(cal_db, cooldown="CD2") == []
+
+    # The set itself corrects like any other, from the calibration database.
+    result = ecal.correct_set(None, fridge.ideals_dir, db_path=cal_db)
+    np.testing.assert_allclose(result["ports"][3], fridge.dut[3], atol=1e-9)
+    assert result["cal_standards"] == {1: "flat_short", 3: "open_1"}
+    assert result["cooldown"] == "CD1"
+    paths = ecal.export_corrected(result, db_path=cal_db)
+    assert paths[0].parent.parent.parent.parent.parent == cal_dir   # not Sweeps/calibration/Sweeps
+
+
+def test_cal_standards_store_the_whole_entry_on_every_run(fridge, caldirs):
+    import json
+    _, cal_db = caldirs
+    _run_std(fridge, channels=[2], cal_standards={2: "offset_60"})
+    stored = {v for _, v in _runs_table(cal_db, "cal_standards").values()}
+    assert len(stored) == 1
+    assert json.loads(stored.pop()) == {"2": dict(REGISTRY["offset_60"], name="offset_60")}
+
+
+def test_cal_standards_respect_an_explicit_db_path(fridge, caldirs):
+    _, cal_db = caldirs
+    cal = _run_std(fridge, channels=[1], cal_standards={1: "flat_short"}, db_path=fridge.db)
+    assert fridge.db.is_file() and not cal_db.exists()
+    assert ecal.list_standard_runs(fridge.db)[0]["set"] == cal["set"]
+
+
+@pytest.mark.parametrize("kw, match", [
+    ({"cal_standards": {1: "flat_short"}, "cooldown": None}, "cooldown"),
+    ({"cal_standards": {1: "nope"}}, "isn't in the standards file"),
+    ({"cal_standards": {4: "flat_short"}}, "doesn't measure"),
+    ({"cal_standards": {"1": "flat_short"}}, "channel numbers"),
+    ({"cal_standards": {}}, "non-empty"),
+    ({"cal_standards": {1: "flat_short"}, "terminations": {1: "load"}}, "terminations"),
+    ({"cal_standards": {1: "flat_short"}, "standards_file": {"x": {"type": "lossy"}}}, "type"),
+    ({"cal_standards": {1: "flat_short"},
+      "standards_file": {"flat_short": {"type": "short", "offset_mm": "5"}}}, "offset_mm"),
+    ({"cooldown": "  "}, "cooldown"),
+])
+def test_bad_cal_standards_fail_before_anything_moves(fridge, caldirs, kw, match):
+    with pytest.raises(ValueError, match=match):
+        _run_std(fridge, channels=[1, 2], **kw)
+    assert fridge.positions == []
+    assert not caldirs[1].exists()
+
+
+def test_standards_file_is_read_from_the_calibration_folder(fridge, caldirs, monkeypatch):
+    import json
+    import read_db
+    cal_dir, cal_db = caldirs
+    monkeypatch.setattr(read_db, "default_cal_dir", lambda: cal_dir)
+    with pytest.raises(FileNotFoundError, match="standards_example.json"):
+        _run_std(fridge, channels=[1], cal_standards={1: "flat_short"}, standards_file=None)
+    cal_dir.mkdir(parents=True)
+    (cal_dir / "standards.json").write_text(json.dumps(REGISTRY))
+    cal = _run_std(fridge, channels=[1], cal_standards={1: "flat_short"}, standards_file=None)
+    assert cal["cal_standards"] == {1: "flat_short"}
+
+
+def test_the_example_standards_file_is_valid():
+    import read_db
+    reg = read_db.load_standards(MEAS / "standards_example.json")
+    assert {e["type"] for e in reg.values()} <= set(read_db.STANDARD_TYPES)
+
+
+# ---------------------------------------------------------------------------
+# Reading the fridge temperature per run
+# ---------------------------------------------------------------------------
+
+def test_temp_reader_reading_goes_on_every_run(fridge):
+    readings = iter(np.linspace(3.0, 3.5, 100))
+    cal = _run(fridge, channels=[1, 2], temp_reader=lambda: next(readings))
+    rows = _runs_table(fridge.db, "mxc_temp_k")
+    temps = [rows[i][1] for i in sorted(rows)]                    # in run order
+    assert len(temps) == 8 and all(t is not None for t in temps)
+    assert temps == sorted(temps) and temps[0] > 3.0              # one fresh reading per run
+    assert ecal.list_sets(fridge.db)[-1]["mxc_temp_k"] == temps[0]
+    assert cal["set"]
+
+
+def test_temp_reader_that_fails_up_front_stops_the_set(fridge):
+    def broken():
+        raise OSError("fridge driver not connected")
+    with pytest.raises(RuntimeError, match="temp_reader failed before"):
+        _run(fridge, temp_reader=broken)
+    assert fridge.positions == []
+
+
+def test_temp_reader_that_fails_partway_only_loses_readings(fridge, capsys):
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 4:
+            raise OSError("timeout")
+        return 3.2
+    _run(fridge, channels=[1], temp_reader=flaky)
+    temps = [t for _, t in _runs_table(fridge.db, "mxc_temp_k").values()]
+    assert len(temps) == 7 and temps.count(None) == 1
+    assert "saving this run without mxc_temp_k" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("value", [None, "warm", -1, 0, True])
+def test_temp_reader_must_return_kelvin(fridge, value):
+    with pytest.raises(RuntimeError, match="temp_reader"):
+        _run(fridge, temp_reader=lambda: value)
+
+
+def test_mxc_temp_k_and_temp_reader_together_is_an_error(fridge):
+    with pytest.raises(ValueError, match="not both"):
+        _run(fridge, mxc_temp_k=3.0, temp_reader=lambda: 3.0)
+
+
 def test_ideals_range_is_enforced(fridge):
     with pytest.raises(ValueError, match="covers"):
         ecal.load_ideals(fridge.ideals_dir, 1, np.array([50e6, 1e9]))
@@ -523,3 +779,9 @@ def test_matches_scikit_rf_oneport():
         cal.run()
         theirs = cal.apply_cal(skrf.Network(str(d / f"port{port}_base.s1p"))).s[:, 0, 0]
         np.testing.assert_allclose(ours, theirs, atol=1e-9)
+
+
+def test_cal_standards_with_bad_labels_still_says_why(fridge, caldirs):
+    with pytest.raises(TypeError, match="must be a dict"):
+        _run_std(fridge, channels=[1], cal_standards={1: "flat_short"}, labels=["x"])
+    assert fridge.positions == []

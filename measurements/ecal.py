@@ -83,14 +83,17 @@ Things this can't fix, so they're worth knowing:
     open has |G| ~ 3 at 1 MHz), so results are cropped there by default.
 """
 
+import json
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
 from read_db import (
-    DEFAULT_OUT_DIR_NAME,
     _columns,
     _connect,
+    default_cal_db_path,
+    files_root,
     load_run,
     save_touchstone,
     sweep_folder,
@@ -272,7 +275,12 @@ def list_sets(db_path=None):
     """
     Every e-cal set in the database, oldest first:
     [{"set": ..., "switch_serials": ..., "date_str": ..., "temp_str": ...,
-      "mxc_temp_k": ..., "n_runs": ...}, ...]
+      "mxc_temp_k": ..., "cooldown": ..., "terminations": {2: "short", ...},
+      "n_runs": ...}, ...]
+
+    "terminations" is {} and "cooldown" None for sets taken without them.
+    mxc_temp_k is the lowest reading in the set. For the calibration
+    database, pass db_path=read_db.default_cal_db_path().
     """
     con, _ = _connect(db_path)
     try:
@@ -280,15 +288,25 @@ def list_sets(db_path=None):
         if "ecal_set" not in have:
             return []
         mxc = "r.mxc_temp_k" if "mxc_temp_k" in have else "NULL"
+        term = "r.ecal_terminations" if "ecal_terminations" in have else "NULL"
+        cd = "r.cooldown" if "cooldown" in have else "NULL"
         rows = con.execute(
             f"SELECT r.ecal_set, r.switch_serials, r.date_str, r.temp_str, "
-            f"MIN({mxc}), COUNT(*) FROM runs r WHERE r.ecal_set IS NOT NULL "
-            "GROUP BY r.ecal_set ORDER BY MIN(r.run_id)"
+            f"MIN({mxc}), MIN({cd}), MIN({term}), COUNT(*) FROM runs r "
+            "WHERE r.ecal_set IS NOT NULL GROUP BY r.ecal_set ORDER BY MIN(r.run_id)"
         ).fetchall()
     finally:
         con.close()
     return [{"set": s, "switch_serials": sn, "date_str": d, "temp_str": t,
-             "mxc_temp_k": m, "n_runs": n} for s, sn, d, t, m, n in rows]
+             "mxc_temp_k": m, "cooldown": c, "terminations": _parse_channel_json(tj),
+             "n_runs": n} for s, sn, d, t, m, c, tj, n in rows]
+
+
+def _parse_channel_json(text):
+    """A {"2": ...} JSON column (ecal_terminations, cal_standards) -> {2: ...}; {} if absent."""
+    if not text:
+        return {}
+    return {int(ch): what for ch, what in json.loads(text).items()}
 
 
 def find_set(set_id=None, db_path=None):
@@ -309,11 +327,12 @@ def find_set(set_id=None, db_path=None):
         have = _columns(con, "runs")
         if "ecal_set" not in have:
             raise LookupError("No e-cal sets in the database")
-        # dut_label only exists once some run has had a label.
-        dut = "dut_label" if "dut_label" in have else "NULL"
+        # These columns only exist once some run has had one.
+        opt = [c if c in have else "NULL"
+               for c in ("dut_label", "ecal_terminations", "cal_standards", "cooldown")]
         rows = con.execute(
             "SELECT run_id, name, ecal_repeat, ecal_role, switch_serials, date_str, temp_str, "
-            f"{dut} FROM runs WHERE ecal_set = ? ORDER BY run_id", (set_id,)
+            f"{', '.join(opt)} FROM runs WHERE ecal_set = ? ORDER BY run_id", (set_id,)
         ).fetchall()
     finally:
         con.close()
@@ -321,7 +340,7 @@ def find_set(set_id=None, db_path=None):
         raise LookupError(f"No e-cal set {set_id!r} in the database")
 
     repeats, labels = {}, {}
-    for run_id, name, k, role, _, _, _, label in rows:
+    for run_id, name, k, role, _, _, _, label, _, _, _ in rows:
         block = repeats.setdefault(int(k), {"before": {}, "ports": {}, "after": {}})
         if role == "port":
             ch = int(name[2:])                            # "RF3" -> 3
@@ -330,10 +349,63 @@ def find_set(set_id=None, db_path=None):
                 labels.setdefault(ch, label)
         else:
             block[role][name] = run_id
-    _, _, _, _, sn, date, temp, _ = rows[0]
+    _, _, _, _, sn, date, temp, _, term_json, std_json, cooldown = rows[0]
+    std = _parse_channel_json(std_json)
     return {"set": set_id, "switch_serials": sn, "date_str": date, "temp_str": temp,
             "labels": {ch: labels[ch] for ch in sorted(labels)},
+            "terminations": _parse_channel_json(term_json),
+            "cal_standards": {ch: std[ch]["name"] for ch in sorted(std)},
+            "cooldown": cooldown,
             "repeats": [repeats[k] for k in sorted(repeats)]}
+
+
+def list_standard_runs(db_path=None, cooldown=None, standard=None):
+    """
+    Every run of a known calibration standard (run_ecal_set(cal_standards=...)),
+    oldest first, one dict each -- the raw material for building your own
+    definitions of the switch's internal standards:
+
+        {"run_id": 12, "set": "20261020T101502.318", "cooldown": "CD1",
+         "switch_serials": "SN0077", "date_str": "20261020", "temp_str": "3K",
+         "mxc_temp_k": 3.1, "channel": 3, "standard": "open_1", "type": "open",
+         "description": ..., "part": ..., "serial": ..., "offset_mm": None,
+         "repeat": 1, "measured_at": "2026-10-20 10:15:07"}
+
+    Defaults to the calibration database (read_db.default_cal_db_path).
+    `cooldown` and `standard` filter. The internal standards measured
+    around each of these runs are in the same set: ecal.find_set(run["set"],
+    db_path) gets them.
+    """
+    db_path = default_cal_db_path() if db_path is None else db_path
+    con, _ = _connect(db_path)
+    try:
+        have = _columns(con, "runs")
+        if "cal_std" not in have:
+            return []
+        cols = ("run_id", "ecal_set", "cooldown", "switch_serials", "date_str", "temp_str",
+                "mxc_temp_k", "channel", "cal_std", "cal_std_type", "cal_std_description",
+                "cal_std_part", "cal_std_serial", "cal_std_offset_mm", "ecal_repeat",
+                "run_timestamp")
+        sel = ", ".join(c if c in have else "NULL" for c in cols)
+        rows = con.execute(f"SELECT {sel} FROM runs WHERE cal_std IS NOT NULL "
+                           "ORDER BY run_id").fetchall()
+    finally:
+        con.close()
+    out = []
+    for (run_id, set_id, cd, sn, date, temp, mxc, ch, name, kind, desc, part, serial,
+         offset, rep, ts) in rows:
+        if cooldown is not None and cd != cooldown:
+            continue
+        if standard is not None and name != standard:
+            continue
+        out.append({"run_id": run_id, "set": set_id, "cooldown": cd, "switch_serials": sn,
+                    "date_str": date, "temp_str": temp, "mxc_temp_k": mxc,
+                    "channel": None if ch is None else int(ch), "standard": name,
+                    "type": kind, "description": desc, "part": part, "serial": serial,
+                    "offset_mm": offset, "repeat": rep,
+                    "measured_at": (datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+                                    if ts else None)})
+    return out
 
 
 def _as_set(ecal, db_path):
@@ -431,6 +503,9 @@ def correct_set(ecal=None, ideals_dir=None, sparam=None, repeat=None, standards=
         raw      {channel: raw `sparam`}     (repeat 1, for comparison)
         terms    {channel: error terms}      (repeat 1)
         labels   {channel: label}            (labelled channels only; see run_ecal_set)
+        terminations {channel: "short", ...}  what was on the ports ({} if not recorded)
+        cal_standards {channel: name}        known standards on the ports ({} if none)
+        cooldown which cooldown the set came from (None if not recorded)
         per_repeat [{channel: calibrated S11}, ...]
         sparam   the raw trace it was solved on
         vna_cal  True if the VNA's own cal was on underneath (run_ecal_set's
@@ -472,10 +547,15 @@ def correct_set(ecal=None, ideals_dir=None, sparam=None, repeat=None, standards=
     ports = {ch: np.mean([r[ch] for r in per_repeat], axis=0) for ch in channels}
     # Sets taken before labels existed have no "labels" key.
     labels = {ch: text for ch, text in (ecal.get("labels") or {}).items() if ch in ports}
+    # Sets from before these existed have no such keys either.
+    terminations = dict(ecal.get("terminations") or {})
+    cal_standards = dict(ecal.get("cal_standards") or {})
     return {"set": ecal["set"], "switch_serials": ecal["switch_serials"],
             "date_str": ecal["date_str"], "temp_str": ecal["temp_str"], "sparam": sparam,
             "ideals_dir": str(ideals_dir), "freq": freq[keep], "ports": ports,
-            "labels": labels, "raw": raw, "terms": terms_out, "per_repeat": per_repeat,
+            "labels": labels, "terminations": terminations, "cal_standards": cal_standards,
+            "cooldown": ecal.get("cooldown"),
+            "raw": raw, "terms": terms_out, "per_repeat": per_repeat,
             "vna_cal": _vna_corrected(next(iter(blocks[0]["ports"].values())), db_path)}
 
 
@@ -538,7 +618,7 @@ def export_corrected(result, out_dir=None, db_path=None):
     if out_dir is None:
         con, db = _connect(db_path)
         con.close()
-        root = Path(db).resolve().parent / DEFAULT_OUT_DIR_NAME
+        root = files_root(db)
         out_dir = sweep_folder(root, result["switch_serials"], result["date_str"],
                                result["temp_str"], f"ecal_corrected_{result['set']}")
     paths = []
@@ -554,14 +634,17 @@ def plot_ecal(result, channels=None, show_raw=False, xlim=None, ylim_db=None, sa
     """
     Calibrated |S11| (dB) and phase for each channel -- the look-at-it-now
     plot for the fridge. Channels labelled in run_ecal_set show as
-    "RF1 (resonator)" in the legend. `show_raw=True` overlays the uncorrected traces
+    "RF1 (resonator)" in the legend (or, with no label, by what
+    `terminations` says is on them: "RF2 (short)"). `show_raw=True` overlays the uncorrected traces
     (dashed) on the magnitude panel. `save` is a path for the figure.
     Returns the two Axes.
     """
     import matplotlib.pyplot as plt
 
     channels = channels or sorted(result["ports"])
-    labels = result.get("labels") or {}
+    labels = dict(result.get("terminations") or {})
+    labels.update(result.get("labels") or {})        # an explicit label wins
+    labels = {ch: t for ch, t in labels.items() if t and t != "none"}
     f = result["freq"] / 1e9
     fig, (ax_m, ax_p) = plt.subplots(2, 1, sharex=True, figsize=(8, 6))
     for ch in channels:

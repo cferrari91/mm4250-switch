@@ -1,0 +1,28 @@
+{
+  "flat_short": {
+    "type": "short",
+    "description": "flush SMA short (EDIT: what it is)",
+    "part": "",
+    "serial": "",
+    "offset_mm": 0
+  },
+  "offset_short_A": {
+    "type": "short",
+    "description": "offset short (EDIT: length of line before the short)",
+    "part": "",
+    "serial": "",
+    "offset_mm": 60.0
+  },
+  "open_1": {
+    "type": "open",
+    "description": "precision SMA open (EDIT)",
+    "part": "",
+    "serial": ""
+  },
+  "load_1": {
+    "type": "load",
+    "description": "50 ohm SMA load (EDIT); cold value unknown unless characterized",
+    "part": "",
+    "serial": ""
+  }
+}

@@ -6,6 +6,13 @@ from them on demand.
     load_run(43)                    (freq_hz, {"S11": ..., "S21": ...}) for one run
     export_touchstone([43, 44])     write .s2p files for runs, in the Sweeps/ layout
     backup_db()                     consistent, timestamped copy of the database
+    load_standards()                the calibration standards file (see below)
+
+Calibration-standards sets (sweep_db.run_ecal_set(cal_standards=...)) go to a
+database of their own, Sweeps/calibration/mm4250_calibration.db
+(default_cal_db_path), with its own db_backups/ and Touchstone files beside
+it, and the standards they name are listed in
+Sweeps/calibration/standards.json (load_standards).
 
 numpy and the standard library only -- no qcodes. So this runs anywhere
 the .db file is, including a laptop with no QCoDeS installed and no
@@ -40,6 +47,13 @@ DEFAULT_OUT_DIR_NAME = "Sweeps"
 DEFAULT_BACKUP_DIR_NAME = "db_backups"
 DEFAULT_BACKUPS_KEPT = 10
 
+# Calibration-standards sets live apart from the sweeps: their own folder,
+# database, backups and standards file. See default_cal_db_path.
+CAL_DIR_NAME = "calibration"
+CAL_DB_NAME = "mm4250_calibration.db"
+STANDARDS_FILE_NAME = "standards.json"
+STANDARD_TYPES = ("short", "open", "load", "other")
+
 # Touchstone column order for a 2-port file is S11, S21, S12, S22 -- NOT
 # the reading order measure_2port uses. Getting these two confused
 # silently swaps forward and reverse transmission in every saved file, so
@@ -52,6 +66,92 @@ _NUMPY_MAGIC = b"\x93NUMPY"
 def default_db_path():
     """mm4250_sweeps.db beside these files -- the one sweep_db writes to."""
     return Path(__file__).resolve().parent / DEFAULT_DB_NAME
+
+
+def default_cal_dir():
+    """Sweeps/calibration/ beside these files: the calibration database's folder."""
+    return Path(__file__).resolve().parent / DEFAULT_OUT_DIR_NAME / CAL_DIR_NAME
+
+
+def default_cal_db_path():
+    """
+    Sweeps/calibration/mm4250_calibration.db: where run_ecal_set(cal_standards=...)
+    records sets by default. Kept apart from mm4250_sweeps.db so the raw data
+    for building your own standard definitions is one self-contained folder
+    (database, backups, standards.json, any Touchstone files) that can be
+    copied or archived on its own.
+    """
+    return default_cal_dir() / CAL_DB_NAME
+
+
+def files_root(db_path):
+    """
+    Where a database's Touchstone files go by default: Sweeps/ beside an
+    ordinary database, but the calibration database's own folder for the
+    calibration database (so its files land in Sweeps/calibration/...,
+    not Sweeps/calibration/Sweeps/...).
+    """
+    db_path = Path(db_path).resolve()
+    if db_path.name == CAL_DB_NAME:
+        return db_path.parent
+    return db_path.parent / DEFAULT_OUT_DIR_NAME
+
+
+def load_standards(path=None):
+    """
+    The calibration standards you own, from a JSON file (default
+    Sweeps/calibration/standards.json): {name: {...}, ...}. Each entry needs
+    "type" (one of STANDARD_TYPES); everything else is optional but worth
+    filling in, because it is copied onto every run measured with that
+    standard:
+
+        {
+          "flat_short": {"type": "short", "description": "flush SMA short",
+                         "part": "...", "serial": "...", "offset_mm": 0},
+          "open_1":     {"type": "open",  "description": "...", "part": "...",
+                         "serial": "..."},
+          "load_1":     {"type": "load",  "description": "...", "part": "...",
+                         "serial": "..."}
+        }
+
+    measurements/standards_example.json is a starting point to copy. A
+    dict instead of a path is checked and returned as-is (for tests, or a
+    one-off). Raises with the reason if the file is missing or malformed,
+    so a typo can't put a half-described standard into the database.
+    """
+    if isinstance(path, dict):
+        data, where = path, "the standards dict"
+    else:
+        path = Path(path) if path is not None else default_cal_dir() / STANDARDS_FILE_NAME
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"No standards file at {path}. Copy measurements/standards_example.json "
+                "there and fill in the standards you have (name -> type, part, serial, "
+                "offset_mm, description)."
+            )
+        import json
+        try:
+            data = json.loads(path.read_text())
+        except ValueError as e:
+            raise ValueError(f"{path} isn't valid JSON: {e}") from None
+        where = str(path)
+    if not isinstance(data, dict) or not data:
+        raise ValueError(f"{where} must be a non-empty {{name: {{...}}}} mapping")
+    out = {}
+    for name, entry in data.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{where}: standard names must be non-empty text, got {name!r}")
+        if not isinstance(entry, dict):
+            raise ValueError(f"{where}: {name!r} must map to a dict of its details")
+        kind = entry.get("type")
+        if kind not in STANDARD_TYPES:
+            raise ValueError(f"{where}: {name!r} has type {kind!r}; "
+                             f"use one of {', '.join(STANDARD_TYPES)}")
+        off = entry.get("offset_mm")
+        if off is not None and (isinstance(off, bool) or not isinstance(off, (int, float))):
+            raise ValueError(f"{where}: {name!r} offset_mm must be a number (mm), got {off!r}")
+        out[name.strip()] = dict(entry)
+    return out
 
 
 def sweep_folder(out_root, switch_serials, date_str, temp_str, group):
@@ -250,7 +350,7 @@ def export_touchstone(run_ids, db_path=None, out_root=None, overwrite=False):
     con, db_path = _connect(db_path)
     con.close()
     copies = out_root is not None
-    out_root = Path(out_root) if copies else db_path.resolve().parent / DEFAULT_OUT_DIR_NAME
+    out_root = Path(out_root) if copies else files_root(db_path)
     runs = {r["run_id"]: r for r in list_runs(db_path)}
 
     paths = []

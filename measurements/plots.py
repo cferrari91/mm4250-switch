@@ -433,6 +433,8 @@ def _traces_from_folder(sweep_dir):
     where, group = (None, None, None), sweep_dir.name
     if read_db.DEFAULT_OUT_DIR_NAME in parts:
         after = parts[parts.index(read_db.DEFAULT_OUT_DIR_NAME) + 1:]
+        if after and after[0] == read_db.CAL_DIR_NAME:       # Sweeps/calibration/...
+            after = after[1:]
         if len(after) >= 3:
             where = tuple(after[:3])
         if len(after) >= 4:
