@@ -686,7 +686,9 @@ def plot_compare(results, labels=None, channel=None, show_raw=False, xlim=None, 
 # any e-cal set at the same temperature, whatever the wiring.
 
 def list_kit_sets(db_path=None):
-    """Every kit set in the database, oldest first: [{"set", "switch_serials", "date_str", "temp_str", "n_runs"}, ...]."""
+    """
+    Every kit set in the database, oldest first: [{"set", "switch_serials", "date_str", "temp_str", "n_runs"}, ...].
+    """
     con, _ = _connect(db_path)
     try:
         if "kit_set" not in _columns(con, "runs"):
