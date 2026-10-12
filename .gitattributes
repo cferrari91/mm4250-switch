@@ -1,0 +1,7 @@
+# Strip notebook outputs and execution counts when a notebook is committed
+# (nbstripout). Your working copy keeps its outputs; only the commit is clean.
+# Inert on a machine until nbstripout is registered in that clone:
+#   pip install nbstripout
+#   nbstripout --install
+*.ipynb filter=nbstripout
+*.ipynb diff=ipynb
