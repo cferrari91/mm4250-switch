@@ -21,11 +21,12 @@ All six live in this repo's `measurements/` folder:
 | `measurements/plots.py` | looking at it -- `plot_measurement`, `plot_sweep`, `summarize` |
 | `measurements/ecal.py` | the fridge e-cal -- calibrated S11 at each channel's connector |
 | `measurements/mm4250_sweeps.ipynb` | the one notebook you run, for every kind of sweep |
+| `measurements/standards_example.json` | only for section G (calibration standards): copy it to `Sweeps\calibration\standards.json` and fill in your standards |
 
 (`twoport_sweep.ipynb` and `oneport_sweep.ipynb` still work but are
 superseded by `mm4250_sweeps.ipynb`; no need to copy them.)
 
-**For the fridge e-cal (section D) also copy NIST's standard
+**For the fridge e-cal (sections F and G) also copy NIST's standard
 definitions**, as folders beside the notebook:
 
 | From (on the laptop) | To (beside the notebook) |
@@ -144,12 +145,17 @@ matter:
   [Calibrated sweeps](#calibrated-sweeps) below.
 - **C. Cal vs. uncal** -- one channel measured with the cal set on, then
   off.
-- **D. Fridge e-cal** -- D1 `run_ecal_set(...)` measures one set (the
-  internal standards, every channel, the standards again, `repeats`
-  times) with correction off; D2 corrects it with NIST's definitions and
-  plots calibrated S11 at each channel's connector. One set per
-  temperature.
 - **E. Browse and plot** -- any runs from any session.
+- **F. DUTs in the fridge** -- F2 `run_ecal_set(...)` measures one set (the
+  internal standards, every DUT channel, the standards again, `repeats`
+  times) with correction off; F3 corrects it with NIST's definitions and
+  plots calibrated S11 at each channel's connector. One set per
+  temperature. Also the stuck check (F1) and ALL_OPEN before any
+  temperature change (F4).
+- **G. Switch internal calibration** -- your own definitions from a cal
+  kit (warm), known standards left on ports through a cooldown, the
+  bench reference and scoring, and what's been collected so far. Writes
+  to its own database under `Sweeps\calibration\`.
 
 Also there: **Check the VNA** (cal sets, settings, correction state),
 **Quick look** (one measurement, nothing saved), **Close** (VNA output
@@ -172,13 +178,18 @@ Users\Charlie_Ferrari\
     plots.py
     ecal.py
     mm4250_sweeps.ipynb
-    ideals_3K\  ideals_295K\                       <- NIST definitions, for section D
+    ideals_3K\  ideals_295K\                       <- NIST definitions, for sections F and G
     mm4250_sweeps.db                                 <- every sweep, always
     db_backups\mm4250_sweeps_<YYYYMMDD-HHMMSS>.db   <- snapshot after each sweep and at Close (newest 10 kept)
     Sweeps\<serials>\<date>\<temp>\<setup>_<cal|uncal>\RF<n>_run<id>.s2p   <- only with touchstone=True
     Sweeps\<serials>\<date>\<temp>\ecal_corrected_<set>\RF<n>.s1p       <- ecal.export_corrected
     figures\<serials>\<date>\<temp>\                <- plots saved with save=, and a day's
                                                        slide-figure set with its make_figures.py
+    Sweeps\calibration\                               <- section G only: calibration-standards sets
+        mm4250_calibration.db                           <- their own database
+        db_backups\mm4250_calibration_<...>.db          <- its snapshots
+        standards.json                                  <- the standards you own (copy standards_example.json)
+        <serials>\<date>\<temp>\ecal_uncal\...         <- only with touchstone=True
 ```
 
 **The database is the record; `.s2p` files are optional.** Every number a

@@ -83,14 +83,17 @@ Things this can't fix, so they're worth knowing:
     open has |G| ~ 3 at 1 MHz), so results are cropped there by default.
 """
 
+import json
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
 from read_db import (
-    DEFAULT_OUT_DIR_NAME,
     _columns,
     _connect,
+    default_cal_db_path,
+    files_root,
     load_run,
     save_touchstone,
     sweep_folder,
@@ -272,7 +275,12 @@ def list_sets(db_path=None):
     """
     Every e-cal set in the database, oldest first:
     [{"set": ..., "switch_serials": ..., "date_str": ..., "temp_str": ...,
-      "mxc_temp_k": ..., "n_runs": ...}, ...]
+      "mxc_temp_k": ..., "cooldown": ..., "terminations": {2: "short", ...},
+      "n_runs": ...}, ...]
+
+    "terminations" is {} and "cooldown" None for sets taken without them.
+    mxc_temp_k is the lowest reading in the set. For the calibration
+    database, pass db_path=read_db.default_cal_db_path().
     """
     con, _ = _connect(db_path)
     try:
@@ -280,15 +288,25 @@ def list_sets(db_path=None):
         if "ecal_set" not in have:
             return []
         mxc = "r.mxc_temp_k" if "mxc_temp_k" in have else "NULL"
+        term = "r.ecal_terminations" if "ecal_terminations" in have else "NULL"
+        cd = "r.cooldown" if "cooldown" in have else "NULL"
         rows = con.execute(
             f"SELECT r.ecal_set, r.switch_serials, r.date_str, r.temp_str, "
-            f"MIN({mxc}), COUNT(*) FROM runs r WHERE r.ecal_set IS NOT NULL "
-            "GROUP BY r.ecal_set ORDER BY MIN(r.run_id)"
+            f"MIN({mxc}), MIN({cd}), MIN({term}), COUNT(*) FROM runs r "
+            "WHERE r.ecal_set IS NOT NULL GROUP BY r.ecal_set ORDER BY MIN(r.run_id)"
         ).fetchall()
     finally:
         con.close()
     return [{"set": s, "switch_serials": sn, "date_str": d, "temp_str": t,
-             "mxc_temp_k": m, "n_runs": n} for s, sn, d, t, m, n in rows]
+             "mxc_temp_k": m, "cooldown": c, "terminations": _parse_channel_json(tj),
+             "n_runs": n} for s, sn, d, t, m, c, tj, n in rows]
+
+
+def _parse_channel_json(text):
+    """A {"2": ...} JSON column (ecal_terminations, cal_standards) -> {2: ...}; {} if absent."""
+    if not text:
+        return {}
+    return {int(ch): what for ch, what in json.loads(text).items()}
 
 
 def find_set(set_id=None, db_path=None):
@@ -309,11 +327,12 @@ def find_set(set_id=None, db_path=None):
         have = _columns(con, "runs")
         if "ecal_set" not in have:
             raise LookupError("No e-cal sets in the database")
-        # dut_label only exists once some run has had a label.
-        dut = "dut_label" if "dut_label" in have else "NULL"
+        # These columns only exist once some run has had one.
+        opt = [c if c in have else "NULL"
+               for c in ("dut_label", "ecal_terminations", "cal_standards", "cooldown")]
         rows = con.execute(
             "SELECT run_id, name, ecal_repeat, ecal_role, switch_serials, date_str, temp_str, "
-            f"{dut} FROM runs WHERE ecal_set = ? ORDER BY run_id", (set_id,)
+            f"{', '.join(opt)} FROM runs WHERE ecal_set = ? ORDER BY run_id", (set_id,)
         ).fetchall()
     finally:
         con.close()
@@ -321,7 +340,7 @@ def find_set(set_id=None, db_path=None):
         raise LookupError(f"No e-cal set {set_id!r} in the database")
 
     repeats, labels = {}, {}
-    for run_id, name, k, role, _, _, _, label in rows:
+    for run_id, name, k, role, _, _, _, label, _, _, _ in rows:
         block = repeats.setdefault(int(k), {"before": {}, "ports": {}, "after": {}})
         if role == "port":
             ch = int(name[2:])                            # "RF3" -> 3
@@ -330,10 +349,153 @@ def find_set(set_id=None, db_path=None):
                 labels.setdefault(ch, label)
         else:
             block[role][name] = run_id
-    _, _, _, _, sn, date, temp, _ = rows[0]
+    _, _, _, _, sn, date, temp, _, term_json, std_json, cooldown = rows[0]
+    std = _parse_channel_json(std_json)
     return {"set": set_id, "switch_serials": sn, "date_str": date, "temp_str": temp,
             "labels": {ch: labels[ch] for ch in sorted(labels)},
+            "terminations": _parse_channel_json(term_json),
+            "cal_standards": {ch: std[ch]["name"] for ch in sorted(std)},
+            "cooldown": cooldown,
             "repeats": [repeats[k] for k in sorted(repeats)]}
+
+
+def list_standard_runs(db_path=None, cooldown=None, standard=None):
+    """
+    Every run of a known calibration standard (run_ecal_set(cal_standards=...)),
+    oldest first, one dict each -- the raw material for building your own
+    definitions of the switch's internal standards:
+
+        {"run_id": 12, "set": "20261020T101502.318", "cooldown": "CD1",
+         "switch_serials": "SN0077", "date_str": "20261020", "temp_str": "3K",
+         "mxc_temp_k": 3.1, "channel": 3, "standard": "open_1", "type": "open",
+         "description": ..., "part": ..., "serial": ..., "offset_mm": None,
+         "repeat": 1, "role": "port", "measured_at": "2026-10-20 10:15:07"}
+
+    Bench references (sweep_db.run_bench_standards) are listed too, with
+    role "bench" and no set or channel.
+
+    Defaults to the calibration database (read_db.default_cal_db_path).
+    `cooldown` and `standard` filter. The internal standards measured
+    around each of these runs are in the same set: ecal.find_set(run["set"],
+    db_path) gets them.
+    """
+    db_path = default_cal_db_path() if db_path is None else db_path
+    con, _ = _connect(db_path)
+    try:
+        have = _columns(con, "runs")
+        if "cal_std" not in have:
+            return []
+        cols = ("run_id", "ecal_set", "cooldown", "switch_serials", "date_str", "temp_str",
+                "mxc_temp_k", "channel", "cal_std", "cal_std_type", "cal_std_description",
+                "cal_std_part", "cal_std_serial", "cal_std_offset_mm", "ecal_repeat",
+                "run_timestamp", "cal_role")
+        sel = ", ".join(c if c in have else "NULL" for c in cols)
+        rows = con.execute(f"SELECT {sel} FROM runs WHERE cal_std IS NOT NULL "
+                           "ORDER BY run_id").fetchall()
+    finally:
+        con.close()
+    out = []
+    for (run_id, set_id, cd, sn, date, temp, mxc, ch, name, kind, desc, part, serial,
+         offset, rep, ts, role) in rows:
+        if cooldown is not None and cd != cooldown:
+            continue
+        if standard is not None and name != standard:
+            continue
+        out.append({"run_id": run_id, "set": set_id, "cooldown": cd, "switch_serials": sn,
+                    "date_str": date, "temp_str": temp, "mxc_temp_k": mxc,
+                    "channel": None if ch is None else int(ch), "standard": name,
+                    "type": kind, "description": desc, "part": part, "serial": serial,
+                    "offset_mm": offset, "repeat": rep, "role": role or "port",
+                    "measured_at": (datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+                                    if ts else None)})
+    return out
+
+
+def standards_coverage(db_path=None, temp_str=None, verbose=True):
+    """
+    Which known standards have been on which port, per switch and
+    temperature, from list_standard_runs (bench runs are skipped). Building
+    a port's own definitions needs at least 3 different standards on that
+    port at that temperature, so each row says whether it has them:
+
+        [{"switch_serials": "SN0077", "temp_str": "3K", "channel": 1,
+          "standards": ["flat_short", "open_1"], "types": ["open", "short"],
+          "cooldowns": ["CD1", "CD2"], "enough": False}, ...]
+
+    "Different" means different names in the standards file; two entries
+    that are physically the same standard don't count twice in reality, so
+    keep one name per physical part. `temp_str` filters. verbose=True prints
+    a table, with what's missing.
+    """
+    rows = {}
+    for r in list_standard_runs(db_path):
+        if r["channel"] is None or (temp_str is not None and r["temp_str"] != temp_str):
+            continue
+        key = (r["switch_serials"], r["temp_str"], r["channel"])
+        row = rows.setdefault(key, {"standards": set(), "types": set(), "cooldowns": set()})
+        row["standards"].add(r["standard"])
+        row["types"].add(r["type"])
+        if r["cooldown"]:
+            row["cooldowns"].add(r["cooldown"])
+    out = []
+    for (sn, temp, ch), row in sorted(rows.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2])):
+        stds = sorted(row["standards"])
+        out.append({"switch_serials": sn, "temp_str": temp, "channel": ch, "standards": stds,
+                    "types": sorted(t for t in row["types"] if t),
+                    "cooldowns": sorted(row["cooldowns"]), "enough": len(stds) >= 3})
+    if verbose:
+        if not out:
+            print("No standards measured on any port yet.")
+        for r in out:
+            need = "" if r["enough"] else f"  <- needs {3 - len(r['standards'])} more"
+            print(f"{r['switch_serials']} {r['temp_str']:>6} RF{r['channel']}: "
+                  f"{len(r['standards'])} standard(s) {r['standards']} "
+                  f"over {r['cooldowns'] or 'no cooldown label'}{need}")
+    return out
+
+
+def compare_to_bench(result, bench, db_path=None, band=None, verbose=True):
+    """
+    How well the e-cal reproduces known standards: for each port in
+    result["cal_standards"] (a set taken with run_ecal_set(cal_standards=...)),
+    its calibrated S11 against the bench run of the same standard
+    (sweep_db.run_bench_standards: {name: run_id}).
+
+    Returns {channel: {"standard", "median_db", "median_abs_diff",
+    "max_abs_diff", "median_ddb", "median_dphase_deg"}} -- the last two only
+    for a reflective standard (|S11| > 0.5), where dB and phase mean
+    something; for a load, look at the vector difference. `band` = (f_lo,
+    f_hi) in Hz limits the comparison; default the whole set. `db_path` is
+    where the bench runs are (default the calibration database).
+    """
+    db_path = default_cal_db_path() if db_path is None else db_path
+    f = result["freq"]
+    keep = np.ones(len(f), bool) if band is None else (f >= band[0]) & (f <= band[1])
+    out = {}
+    for ch, name in sorted((result.get("cal_standards") or {}).items()):
+        if ch not in result["ports"]:
+            continue
+        g = result["ports"][ch][keep]
+        row = {"standard": name, "median_db": float(np.median(20 * np.log10(np.abs(g))))}
+        if name in (bench or {}):
+            fr, data = load_run(bench[name], db_path)
+            s = data["S11"]
+            ref = np.interp(f[keep], fr, s.real) + 1j * np.interp(f[keep], fr, s.imag)
+            dv = np.abs(g - ref)
+            row.update(median_abs_diff=float(np.median(dv)), max_abs_diff=float(dv.max()))
+            if np.median(np.abs(ref)) > 0.5:
+                row.update(median_ddb=float(np.median(20 * np.log10(np.abs(g / ref)))),
+                           median_dphase_deg=float(np.median(np.angle(g / ref, deg=True))))
+        out[ch] = row
+        if verbose:
+            line = f"RF{ch} ({name}): |S11| median {row['median_db']:+.2f} dB"
+            if "median_abs_diff" in row:
+                line += (f"; vs bench |dS11| median {row['median_abs_diff']:.3g}, "
+                         f"max {row['max_abs_diff']:.3g}")
+            if "median_ddb" in row:
+                line += f"; {row['median_ddb']:+.2f} dB, {row['median_dphase_deg']:+.1f} deg"
+            print(line)
+    return out
 
 
 def _as_set(ecal, db_path):
@@ -431,6 +593,9 @@ def correct_set(ecal=None, ideals_dir=None, sparam=None, repeat=None, standards=
         raw      {channel: raw `sparam`}     (repeat 1, for comparison)
         terms    {channel: error terms}      (repeat 1)
         labels   {channel: label}            (labelled channels only; see run_ecal_set)
+        terminations {channel: "short", ...}  what was on the ports ({} if not recorded)
+        cal_standards {channel: name}        known standards on the ports ({} if none)
+        cooldown which cooldown the set came from (None if not recorded)
         per_repeat [{channel: calibrated S11}, ...]
         sparam   the raw trace it was solved on
         vna_cal  True if the VNA's own cal was on underneath (run_ecal_set's
@@ -472,40 +637,64 @@ def correct_set(ecal=None, ideals_dir=None, sparam=None, repeat=None, standards=
     ports = {ch: np.mean([r[ch] for r in per_repeat], axis=0) for ch in channels}
     # Sets taken before labels existed have no "labels" key.
     labels = {ch: text for ch, text in (ecal.get("labels") or {}).items() if ch in ports}
+    # Sets from before these existed have no such keys either.
+    terminations = dict(ecal.get("terminations") or {})
+    cal_standards = dict(ecal.get("cal_standards") or {})
     return {"set": ecal["set"], "switch_serials": ecal["switch_serials"],
             "date_str": ecal["date_str"], "temp_str": ecal["temp_str"], "sparam": sparam,
             "ideals_dir": str(ideals_dir), "freq": freq[keep], "ports": ports,
-            "labels": labels, "raw": raw, "terms": terms_out, "per_repeat": per_repeat,
+            "labels": labels, "terminations": terminations, "cal_standards": cal_standards,
+            "cooldown": ecal.get("cooldown"),
+            "raw": raw, "terms": terms_out, "per_repeat": per_repeat,
             "vna_cal": _vna_corrected(next(iter(blocks[0]["ports"].values())), db_path)}
 
 
 def drift(ecal=None, db_path=None, fmin=DEFAULT_FMIN_HZ, sparam=None, verbose=True):
     """
-    How much the raw standards moved during each repeat: |G_after - G_before|
-    per standard. Returns {"freq": f, "repeats": [{"open": arr, ...}, ...]}.
+    How much the standards moved during each repeat, between the "before"
+    and "after" measurements. Returns
+    {"freq": f, "repeats_cal": [{"open": arr, ...}, ...], "repeats": [...]}.
 
-    For scale: the corrected result can't be better than this, and NIST's
-    same-temperature repeatability was a few 1e-2. Values well above that
-    mean the chain (usually a cold amplifier) drifted -- take the set
-    again, and make it quicker (fewer points or channels) if it keeps
-    happening. `sparam` is the trace to check, as in correct_set.
+    repeats_cal is the number to judge a set by: calibrate with the
+    "before" standards (as "perfect" ones, so no definitions file is
+    needed), and see how far off the "after" standards then read, in
+    reflection units at the switch. It doesn't depend on the chain: the
+    same drift reads the same with 40 dB of attenuation or 30 dB of gain
+    in front of the VNA. NIST's same-temperature repeatability was a few
+    1e-2; well above that means the chain (usually a cold amplifier)
+    drifted -- take the set again, and make it quicker (fewer points or
+    channels) if it keeps happening.
+
+    repeats is the raw |G_after - G_before| on the trace, kept for
+    reference. Its size is scaled by the whole chain's loss and gain
+    (|e01e10|), so don't compare it with NIST's number. `sparam` is the
+    trace to check, as in correct_set.
     """
     ecal = _as_set(ecal, db_path)
     sparam, freq = _pick_sparam(ecal, sparam, db_path)
     keep = freq >= fmin
-    out = []
+    out, out_cal = [], []
+    perfect = {std: np.full(len(freq), PERFECT_VALUES[std]) for std in STANDARD_STATES}
     for k, block in enumerate(ecal["repeats"], start=1):
         if not block.get("after"):
             continue
         before = _raw_standards(block, "before", db_path, freq, sparam)
         after = _raw_standards(block, "after", db_path, freq, sparam)
         d = {std: np.abs(after[std] - before[std])[keep] for std in STANDARD_STATES}
+        terms = solve_error_terms(before, perfect)
+        d_cal = {std: np.abs(apply_correction(terms, after[std]) - perfect[std])[keep]
+                 for std in STANDARD_STATES}
         out.append(d)
+        out_cal.append(d_cal)
         if verbose:
             parts = ", ".join(f"{std} median {np.median(v):.2g} / max {np.max(v):.2g}"
-                              for std, v in d.items())
-            print(f"repeat {k} drift |after - before| ({sparam}): {parts}")
-    return {"freq": freq[keep], "repeats": out}
+                              for std, v in d_cal.items())
+            print(f"repeat {k} drift, calibrated ({sparam}): {parts}  "
+                  "<- compare with NIST's few 1e-2")
+            scale = np.median(np.abs(terms["e01e10"][keep]))
+            print(f"    (raw |after - before| is these times the chain's |e01e10| "
+                  f"~ {scale:.2g}; raw open median {np.median(d['open']):.2g})")
+    return {"freq": freq[keep], "repeats_cal": out_cal, "repeats": out}
 
 
 def repeatability(result, verbose=True):
@@ -538,7 +727,7 @@ def export_corrected(result, out_dir=None, db_path=None):
     if out_dir is None:
         con, db = _connect(db_path)
         con.close()
-        root = Path(db).resolve().parent / DEFAULT_OUT_DIR_NAME
+        root = files_root(db)
         out_dir = sweep_folder(root, result["switch_serials"], result["date_str"],
                                result["temp_str"], f"ecal_corrected_{result['set']}")
     paths = []
@@ -554,14 +743,17 @@ def plot_ecal(result, channels=None, show_raw=False, xlim=None, ylim_db=None, sa
     """
     Calibrated |S11| (dB) and phase for each channel -- the look-at-it-now
     plot for the fridge. Channels labelled in run_ecal_set show as
-    "RF1 (resonator)" in the legend. `show_raw=True` overlays the uncorrected traces
+    "RF1 (resonator)" in the legend (or, with no label, by what
+    `terminations` says is on them: "RF2 (short)"). `show_raw=True` overlays the uncorrected traces
     (dashed) on the magnitude panel. `save` is a path for the figure.
     Returns the two Axes.
     """
     import matplotlib.pyplot as plt
 
     channels = channels or sorted(result["ports"])
-    labels = result.get("labels") or {}
+    labels = dict(result.get("terminations") or {})
+    labels.update(result.get("labels") or {})        # an explicit label wins
+    labels = {ch: t for ch, t in labels.items() if t and t != "none"}
     f = result["freq"] / 1e9
     fig, (ax_m, ax_p) = plt.subplots(2, 1, sharex=True, figsize=(8, 6))
     for ch in channels:
@@ -686,7 +878,9 @@ def plot_compare(results, labels=None, channel=None, show_raw=False, xlim=None, 
 # any e-cal set at the same temperature, whatever the wiring.
 
 def list_kit_sets(db_path=None):
-    """Every kit set in the database, oldest first: [{"set", "switch_serials", "date_str", "temp_str", "n_runs"}, ...]."""
+    """
+    Every kit set in the database, oldest first: [{"set", "switch_serials", "date_str", "temp_str", "n_runs"}, ...].
+    """
     con, _ = _connect(db_path)
     try:
         if "kit_set" not in _columns(con, "runs"):
