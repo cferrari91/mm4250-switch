@@ -121,10 +121,13 @@ How to read it:
 ## 6. 3 K pair of sets
 
 Cold, once 3 K is stable and F1 came back clean, set `temp_str = "3K"` and take
-**F2** and **G2** again. Look at each drift printout first: if the raw standards
-moved much more than NIST's few 1e-2 between "before" and "after", the chain
-drifted during the set and the result can't be better than that. Take it again,
-quicker if needed (fewer points or channels).
+**F2** and **G2** again. Look at each drift printout first, the **calibrated**
+line: how far the standards moved between "before" and "after", in reflection
+units at the switch. If that's much more than NIST's few 1e-2, the chain drifted
+during the set and the result can't be better than that. Take it again, quicker
+if needed (fewer points or channels). The raw line under it is scaled by the
+chain's loss and gain *(certain: it's |e01e10| times the calibrated one, to first
+order)*, so don't compare that one with NIST.
 
 ## 7. Post-processing: does the e-cal give back the short and load?
 

@@ -651,31 +651,50 @@ def correct_set(ecal=None, ideals_dir=None, sparam=None, repeat=None, standards=
 
 def drift(ecal=None, db_path=None, fmin=DEFAULT_FMIN_HZ, sparam=None, verbose=True):
     """
-    How much the raw standards moved during each repeat: |G_after - G_before|
-    per standard. Returns {"freq": f, "repeats": [{"open": arr, ...}, ...]}.
+    How much the standards moved during each repeat, between the "before"
+    and "after" measurements. Returns
+    {"freq": f, "repeats_cal": [{"open": arr, ...}, ...], "repeats": [...]}.
 
-    For scale: the corrected result can't be better than this, and NIST's
-    same-temperature repeatability was a few 1e-2. Values well above that
-    mean the chain (usually a cold amplifier) drifted -- take the set
-    again, and make it quicker (fewer points or channels) if it keeps
-    happening. `sparam` is the trace to check, as in correct_set.
+    repeats_cal is the number to judge a set by: calibrate with the
+    "before" standards (as "perfect" ones, so no definitions file is
+    needed), and see how far off the "after" standards then read, in
+    reflection units at the switch. It doesn't depend on the chain: the
+    same drift reads the same with 40 dB of attenuation or 30 dB of gain
+    in front of the VNA. NIST's same-temperature repeatability was a few
+    1e-2; well above that means the chain (usually a cold amplifier)
+    drifted -- take the set again, and make it quicker (fewer points or
+    channels) if it keeps happening.
+
+    repeats is the raw |G_after - G_before| on the trace, kept for
+    reference. Its size is scaled by the whole chain's loss and gain
+    (|e01e10|), so don't compare it with NIST's number. `sparam` is the
+    trace to check, as in correct_set.
     """
     ecal = _as_set(ecal, db_path)
     sparam, freq = _pick_sparam(ecal, sparam, db_path)
     keep = freq >= fmin
-    out = []
+    out, out_cal = [], []
+    perfect = {std: np.full(len(freq), PERFECT_VALUES[std]) for std in STANDARD_STATES}
     for k, block in enumerate(ecal["repeats"], start=1):
         if not block.get("after"):
             continue
         before = _raw_standards(block, "before", db_path, freq, sparam)
         after = _raw_standards(block, "after", db_path, freq, sparam)
         d = {std: np.abs(after[std] - before[std])[keep] for std in STANDARD_STATES}
+        terms = solve_error_terms(before, perfect)
+        d_cal = {std: np.abs(apply_correction(terms, after[std]) - perfect[std])[keep]
+                 for std in STANDARD_STATES}
         out.append(d)
+        out_cal.append(d_cal)
         if verbose:
             parts = ", ".join(f"{std} median {np.median(v):.2g} / max {np.max(v):.2g}"
-                              for std, v in d.items())
-            print(f"repeat {k} drift |after - before| ({sparam}): {parts}")
-    return {"freq": freq[keep], "repeats": out}
+                              for std, v in d_cal.items())
+            print(f"repeat {k} drift, calibrated ({sparam}): {parts}  "
+                  "<- compare with NIST's few 1e-2")
+            scale = np.median(np.abs(terms["e01e10"][keep]))
+            print(f"    (raw |after - before| is these times the chain's |e01e10| "
+                  f"~ {scale:.2g}; raw open median {np.median(d['open']):.2g})")
+    return {"freq": freq[keep], "repeats_cal": out_cal, "repeats": out}
 
 
 def repeatability(result, verbose=True):

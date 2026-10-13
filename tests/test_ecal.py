@@ -199,6 +199,28 @@ def test_drift_is_reported_and_mean_standards_split_it(fridge):
     assert np.max(np.abs(mean["ports"][1] - fridge.dut[1])) > 1e-4
 
 
+def test_calibrated_drift_does_not_depend_on_chain_gain(fridge):
+    # The same drift seen through a chain with 100x the gain: raw drift is
+    # 100x bigger, the calibrated drift (what to compare with NIST) isn't.
+    fridge.drift = 0.01
+    d1 = ecal.drift(_run(fridge, channels=[1]), db_path=fridge.db, verbose=False)
+    fridge.raw_std = {s: 100 * g for s, g in fridge.raw_std.items()}
+    fridge.drift = 1.0
+    fridge.ports_done = False                                   # fresh set: "before" undrifted
+    d2 = ecal.drift(_run(fridge, channels=[1]), db_path=fridge.db, verbose=False)
+    for std in ("open", "short", "load"):
+        np.testing.assert_allclose(d2["repeats"][0][std], 100 * d1["repeats"][0][std], rtol=1e-9)
+        np.testing.assert_allclose(d2["repeats_cal"][0][std], d1["repeats_cal"][0][std],
+                                   rtol=1e-6)
+    assert np.median(d1["repeats_cal"][0]["open"]) > 0.01      # |e01e10| < 1 here, so bigger than raw
+
+
+def test_calibrated_drift_is_zero_without_drift(fridge):
+    d = ecal.drift(_run(fridge, channels=[1]), db_path=fridge.db, verbose=False)
+    for std in ("open", "short", "load"):
+        assert d["repeats_cal"][0][std].max() < 1e-9
+
+
 def test_export_writes_one_file_per_channel(fridge, tmp_path):
     cal = _run(fridge, channels=[1, 4])
     result = ecal.correct_set(cal, fridge.ideals_dir, db_path=fridge.db)
@@ -300,7 +322,7 @@ def test_correct_and_plot_is_correct_set_plus_checks(fridge, capsys):
     cal = _run(fridge, channels=[1, 6], repeats=2)
     result = ecal.correct_and_plot(cal, fridge.ideals_dir, sparam="S21", db_path=fridge.db)
     out = capsys.readouterr().out
-    assert "drift |after - before| (S21)" in out and "RF6: median" in out
+    assert "drift, calibrated (S21)" in out and "RF6: median" in out
     expected = ecal.correct_set(cal, fridge.ideals_dir, sparam="S21", db_path=fridge.db)
     np.testing.assert_allclose(result["ports"][6], expected["ports"][6])
 
