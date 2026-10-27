@@ -63,9 +63,41 @@ TOUCHSTONE_2PORT_ORDER = ("S11", "S21", "S12", "S22")
 _NUMPY_MAGIC = b"\x93NUMPY"
 
 
-def default_db_path():
-    """mm4250_sweeps.db beside these files -- the one sweep_db writes to."""
+# This session's databases, when they aren't the files beside this module.
+# Set by sweep_db.use_lab_databases() (the lab's per-project, per-cooldown
+# files on the DAQ) or by use_databases(); None = the file beside this module.
+#   "main"       the switch's runs: what default_db_path() returns
+#   "resonator"  section B's copies and fits: what duts.resonator_db_path() returns
+# The calibration database (default_cal_db_path) is never redirected: its
+# bench runs and kit definitions are used across cooldowns.
+DB_OVERRIDES = {"main": None, "resonator": None}
+
+
+def use_databases(main=None, resonator=None):
+    """
+    Point this session's main and resonator databases somewhere else (None =
+    back to the file beside these files). Everything that takes db_path=None
+    -- sweeps, e-cal sets, list_runs, load_run, backup_db, ecal.find_set,
+    duts.copy_set, ... -- then uses these. Lasts until the kernel restarts.
+    """
+    DB_OVERRIDES["main"] = Path(main).resolve() if main is not None else None
+    DB_OVERRIDES["resonator"] = Path(resonator).resolve() if resonator is not None else None
+
+
+def code_db_path():
+    """mm4250_sweeps.db beside these files: every run from before the lab databases (cooldown 5)."""
     return Path(__file__).resolve().parent / DEFAULT_DB_NAME
+
+
+def default_db_path():
+    """
+    The main database, the one sweep_db writes to: this session's lab
+    database once sweep_db.use_lab_databases() has run, otherwise
+    mm4250_sweeps.db beside these files (code_db_path).
+    """
+    if DB_OVERRIDES["main"] is not None:
+        return DB_OVERRIDES["main"]
+    return code_db_path()
 
 
 def default_cal_dir():

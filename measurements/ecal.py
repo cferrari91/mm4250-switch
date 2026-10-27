@@ -84,6 +84,7 @@ Things this can't fix, so they're worth knowing:
 """
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -155,6 +156,37 @@ def read_s1p(path):
         mag = x if fmt == "MA" else 10 ** (x / 20)
         gamma = mag * np.exp(1j * np.deg2rad(y))
     return freq, gamma
+
+
+def nist_definitions_for(temp_str):
+    """
+    Which of NIST's two sets of definitions fits a temperature label, as
+    find_ideals takes it: "295K" or "3K".
+
+        ideals = find_ideals(nist_definitions_for(temp_str), start=here)
+
+    "295K" for room temperature (250 K and up), "3K" for 4.5 K and below
+    (NIST found their 3 K definitions hold down to 25 mK, so base uses
+    them too). Labels are a number plus K or mK: "295K", "3K", "10mK",
+    "60K". Anything in between (a set taken on the way down, at 30-80 K)
+    has no definitions of its own: this says so, loudly, and returns "3K",
+    so the correction runs but is rough. A label it can't read gets the
+    same warning ("3K", as the notebook always did).
+    """
+    m = re.fullmatch(r"\s*(\d+(?:\.\d*)?)\s*(mK|K|mk|k)\s*", str(temp_str))
+    if m is None:
+        print(f"[warning] can't read a temperature from {temp_str!r} (want e.g. '295K', "
+              "'10mK'); using NIST's 3K definitions")
+        return "3K"
+    kelvin = float(m.group(1)) * (1e-3 if m.group(2).lower() == "mk" else 1.0)
+    if kelvin >= 250:
+        return "295K"
+    if kelvin <= 4.5:
+        return "3K"
+    print(f"[warning] {temp_str}: NIST's definitions exist for 295 K and 3 K (3 K holds down "
+          f"to 25 mK) only. Nothing covers {temp_str}, so this uses the 3K ones and the "
+          "correction is rough: don't quote it. The stuck check (A1) needs no definitions.")
+    return "3K"
 
 
 def find_ideals(temperature="3K", start=None):
@@ -329,7 +361,8 @@ def find_set(set_id=None, db_path=None):
             raise LookupError("No e-cal sets in the database")
         # These columns only exist once some run has had one.
         opt = [c if c in have else "NULL"
-               for c in ("dut_label", "ecal_terminations", "cal_standards", "cooldown")]
+               for c in ("dut_label", "ecal_terminations", "cal_standards", "cooldown",
+                         "ecal_metadata")]
         rows = con.execute(
             "SELECT run_id, name, ecal_repeat, ecal_role, switch_serials, date_str, temp_str, "
             f"{', '.join(opt)} FROM runs WHERE ecal_set = ? ORDER BY run_id", (set_id,)
@@ -340,7 +373,7 @@ def find_set(set_id=None, db_path=None):
         raise LookupError(f"No e-cal set {set_id!r} in the database")
 
     repeats, labels = {}, {}
-    for run_id, name, k, role, _, _, _, label, _, _, _ in rows:
+    for run_id, name, k, role, _, _, _, label, _, _, _, _ in rows:
         block = repeats.setdefault(int(k), {"before": {}, "ports": {}, "after": {}})
         if role == "port":
             ch = int(name[2:])                            # "RF3" -> 3
@@ -349,13 +382,15 @@ def find_set(set_id=None, db_path=None):
                 labels.setdefault(ch, label)
         else:
             block[role][name] = run_id
-    _, _, _, _, sn, date, temp, _, term_json, std_json, cooldown = rows[0]
+    _, _, _, _, sn, date, temp, _, term_json, std_json, cooldown, meta_json = rows[0]
     std = _parse_channel_json(std_json)
     return {"set": set_id, "switch_serials": sn, "date_str": date, "temp_str": temp,
             "labels": {ch: labels[ch] for ch in sorted(labels)},
             "terminations": _parse_channel_json(term_json),
             "cal_standards": {ch: std[ch]["name"] for ch in sorted(std)},
+            "cal_standards_info": {ch: std[ch] for ch in sorted(std)},
             "cooldown": cooldown,
+            "metadata": json.loads(meta_json) if meta_json else {},
             "repeats": [repeats[k] for k in sorted(repeats)]}
 
 
@@ -498,6 +533,169 @@ def compare_to_bench(result, bench, db_path=None, band=None, verbose=True):
     return out
 
 
+# What a check standard should read at its connector, by type. A flush short
+# (offset_mm 0 or missing) is -1 at any temperature (NIST's README). A load is
+# 0 only as far as the load is good, and its cold value isn't known, so its
+# reading is an upper limit on the leftover offset (directivity), not an exact
+# value. An open is +1 only roughly (fringing capacitance turns its phase a
+# few degrees). An offset short or "other" has no ideal here: bench only.
+_CHECK_IDEAL = {"short": -1 + 0j, "load": 0j, "open": 1 + 0j}
+
+
+def check_standards(result, bench=None, bench_db=None, band=None, verbose=True):
+    """
+    Score the check standards in a corrected set: known standards measured in
+    the same e-cal set as the DUTs (run_ecal_set(cal_standards=...)), so they
+    went through exactly the same correction. How far off they read is the
+    evidence for how good the correction is at the connector.
+
+    For each standard: the error against what it should read (see
+    _CHECK_IDEAL: |G - ideal| worst and median; for a short or open also the
+    worst dB and degrees off; for a load its worst |G| in dB), how much the
+    repeats disagree, and, with `bench`, the vector difference from that
+    standard's bench reference. `bench` is either
+
+      * a corrected bench e-cal: correct_set's result for a set taken with
+        the switch on the bench (no fridge) and the same standards on their
+        ports (run_ecal_set(cal_standards=..., cooldown="bench")). Matched
+        by standard name, so the ports may differ. It went through NIST's
+        definitions too, so it is a reference for what the fridge and the
+        temperature change, not an independent truth; or
+      * {name: run_id} from sweep_db.run_bench_standards (the VNA's own cal,
+        no switch), stored in `bench_db`, default the calibration database.
+
+    A bench reference that doesn't cover the set's frequencies is skipped
+    for that standard (with a note), rather than extrapolated.
+
+    Each standard checks its own port's definitions only; carrying the
+    number over to a DUT's port is an assumption (see compare_definitions).
+    `band` = (f_lo, f_hi) in Hz; default the whole set. Returns
+    {channel: {...}}, and prints a line per standard plus the worst case.
+    """
+    f = result["freq"]
+    keep = np.ones(len(f), bool) if band is None else (f >= band[0]) & (f <= band[1])
+    info = result.get("cal_standards_info") or {}
+    bench_db = default_cal_db_path() if bench_db is None else bench_db
+    if bench and "ports" in bench:            # a corrected bench e-cal (correct_set's result)
+        bench_traces = {nm: (bench["freq"], bench["ports"][bch])
+                        for bch, nm in (bench.get("cal_standards") or {}).items()
+                        if bch in bench["ports"]}
+        bench_kind = f"bench e-cal {bench.get('set')}"
+    else:                                     # {name: run_id}, the VNA-calibrated bench runs
+        bench_traces = {}
+        for nm, rid in (bench or {}).items():
+            fr, data = load_run(rid, bench_db)
+            bench_traces[nm] = (fr, data["S11"])
+        bench_kind = "bench runs"
+    out = {}
+    for ch, name in sorted((result.get("cal_standards") or {}).items()):
+        if ch not in result["ports"]:
+            continue
+        g = result["ports"][ch][keep]
+        kind = (info.get(ch) or {}).get("type")
+        offset = (info.get(ch) or {}).get("offset_mm") or 0
+        ideal = None if (kind == "short" and offset) else _CHECK_IDEAL.get(kind)
+        row = {"standard": name, "type": kind}
+        if ideal is not None:
+            d = np.abs(g - ideal)
+            row.update(max_err=float(d.max()), median_err=float(np.median(d)))
+            if kind == "load":
+                row["worst_db"] = float(20 * np.log10(max(np.abs(g).max(), 1e-15)))
+            else:
+                row.update(worst_db=float(np.abs(20 * np.log10(np.abs(g))).max()),
+                           worst_deg=float(np.abs(np.angle(g / ideal, deg=True)).max()))
+        reps = [r[ch][keep] for r in result.get("per_repeat") or [] if ch in r]
+        if len(reps) > 1:
+            row["repeat_spread"] = float(max(np.abs(a - b).max() for a in reps for b in reps))
+        if name in bench_traces:
+            fr, s = bench_traces[name]
+            fk = f[keep]
+            if fk.min() < fr.min() - 1 or fk.max() > fr.max() + 1:      # 1 Hz slack for rounding
+                row["bench_note"] = (f"bench covers {fr.min() / 1e6:.0f}-{fr.max() / 1e6:.0f} MHz "
+                                     "only, not compared")
+            else:
+                ref = np.interp(fk, fr, s.real) + 1j * np.interp(fk, fr, s.imag)
+                dv = np.abs(g - ref)
+                row.update(bench_max=float(dv.max()), bench_median=float(np.median(dv)))
+        out[ch] = row
+
+    if verbose:
+        lo, hi = f[keep].min() / 1e6, f[keep].max() / 1e6
+        print(f"Check standards, set {result['set']} ({result['temp_str']}), "
+              f"definitions {_ideals_name(result['ideals_dir'])}, {lo:.0f}-{hi:.0f} MHz"
+              + (f"; against {bench_kind}" if bench_traces else ""))
+        if not out:
+            print("  none in this set (run_ecal_set(cal_standards=...) puts them in)")
+        for ch, r in out.items():
+            line = f"  RF{ch} {r['standard']} ({r['type']}):"
+            if "max_err" in r:
+                target = {"short": "-1", "load": "0", "open": "+1"}[r["type"]]
+                line += f" |G - ({target})| worst {r['max_err']:.3g}, median {r['median_err']:.3g}"
+                if r["type"] == "load":
+                    line += f" (worst |G| {r['worst_db']:.1f} dB)"
+                else:
+                    line += f" (worst {r['worst_db']:.2f} dB, {r['worst_deg']:.1f} deg)"
+            else:
+                line += " no ideal value (offset short / other): bench only"
+            if "repeat_spread" in r:
+                line += f"; repeats differ by up to {r['repeat_spread']:.3g}"
+            if "bench_max" in r:
+                line += f"; vs bench worst {r['bench_max']:.3g}, median {r['bench_median']:.3g}"
+            elif "bench_note" in r:
+                line += f"; {r['bench_note']}"
+            print(line)
+        for kind in ("short", "load", "open"):
+            worst = [r["max_err"] for r in out.values() if r["type"] == kind and "max_err" in r]
+            if worst:
+                print(f"  worst {kind}: {max(worst):.3g} (reflection units at the connector)")
+    return out
+
+
+def _remap(z, a, b):
+    """
+    The Mobius map that sends a's open/short/load to b's, applied to z.
+    Correcting with definitions b when a are the true ones turns a true
+    reflection z into _remap(z, a, b): both corrections share the same raw
+    standards, so they differ by exactly this map.
+    """
+    z1, z2, z3 = a["open"], a["short"], a["load"]
+    w1, w2, w3 = b["open"], b["short"], b["load"]
+    at_load = np.isclose(z, z3, rtol=0, atol=1e-12)    # the map's pole: z is a's load, so -> b's load
+    zz = np.where(at_load, z3 + 1, z)                   # any harmless value; replaced below
+    k = (zz - z1) * (z2 - z3) / ((zz - z3) * (z2 - z1)) * (w2 - w1) / (w2 - w3)
+    return np.where(at_load, w3, (w1 - k * w3) / (1 - k))
+
+
+def compare_definitions(true_defs, used_defs, freq, ports=range(1, 7), verbose=True):
+    """
+    How much it matters to correct with `used_defs` when `true_defs` are
+    right: per port, the error a short (-1) and a load (0) would read with,
+    worst and median over `freq` (Hz array). Needs no measurement, only the
+    two sets of definitions (folders, or "perfect").
+
+    Uses: your kit's definitions (make_ideals) vs NIST's on the same ports,
+    warm, to see how far NIST's switch is from yours on each port; NIST's
+    two cooldown series (tier2_3k1 vs tier2_3k2) for how much definitions
+    move between cooldowns. Returns {port: {"short_max", "short_median",
+    "load_max", "load_median"}}.
+    """
+    freq = np.asarray(freq, float)
+    out = {}
+    for p in ports:
+        a, b = load_ideals(true_defs, p, freq), load_ideals(used_defs, p, freq)
+        es = np.abs(_remap(np.full(len(freq), -1 + 0j), a, b) + 1)
+        el = np.abs(_remap(np.zeros(len(freq), complex), a, b))
+        out[p] = {"short_max": float(es.max()), "short_median": float(np.median(es)),
+                  "load_max": float(el.max()), "load_median": float(np.median(el))}
+    if verbose:
+        print(f"{_ideals_name(used_defs)} used where {_ideals_name(true_defs)} are right, "
+              f"{freq.min() / 1e6:.0f}-{freq.max() / 1e6:.0f} MHz:")
+        for p, r in out.items():
+            print(f"  RF{p}: short off by up to {r['short_max']:.3g} (median {r['short_median']:.3g}), "
+                  f"load up to {r['load_max']:.3g} (median {r['load_median']:.3g})")
+    return out
+
+
 def _as_set(ecal, db_path):
     if ecal is None or isinstance(ecal, str):
         return find_set(ecal, db_path)
@@ -595,6 +793,7 @@ def correct_set(ecal=None, ideals_dir=None, sparam=None, repeat=None, standards=
         labels   {channel: label}            (labelled channels only; see run_ecal_set)
         terminations {channel: "short", ...}  what was on the ports ({} if not recorded)
         cal_standards {channel: name}        known standards on the ports ({} if none)
+        cal_standards_info {channel: entry}  each one's standards-file entry (type, offset_mm, ...)
         cooldown which cooldown the set came from (None if not recorded)
         per_repeat [{channel: calibrated S11}, ...]
         sparam   the raw trace it was solved on
@@ -640,11 +839,12 @@ def correct_set(ecal=None, ideals_dir=None, sparam=None, repeat=None, standards=
     # Sets from before these existed have no such keys either.
     terminations = dict(ecal.get("terminations") or {})
     cal_standards = dict(ecal.get("cal_standards") or {})
+    cal_standards_info = dict(ecal.get("cal_standards_info") or {})
     return {"set": ecal["set"], "switch_serials": ecal["switch_serials"],
             "date_str": ecal["date_str"], "temp_str": ecal["temp_str"], "sparam": sparam,
             "ideals_dir": str(ideals_dir), "freq": freq[keep], "ports": ports,
             "labels": labels, "terminations": terminations, "cal_standards": cal_standards,
-            "cooldown": ecal.get("cooldown"),
+            "cal_standards_info": cal_standards_info, "cooldown": ecal.get("cooldown"),
             "raw": raw, "terms": terms_out, "per_repeat": per_repeat,
             "vna_cal": _vna_corrected(next(iter(blocks[0]["ports"].values())), db_path)}
 

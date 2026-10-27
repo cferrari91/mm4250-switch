@@ -191,6 +191,14 @@ changing them.
   folder rather than the working directory, so copying these files
   somewhere else (the lab machine's `Users/Charlie_Ferrari/`, say) puts the
   outputs in that folder too. Override with `out_root=` / `db_path=`.
+- On the lab DAQ (from cooldown 5), `sweep_db.use_lab_databases(cooldown,
+  switch_project, resonator_project)` points the session at the lab's
+  per-project, per-cooldown databases (the framework's
+  `scripts/database_helper.py`, `name="vna"` by default:
+  `E:\QCoDeS\<project>\Cooldown_<NN>\<project>_Cooldown_<NN>_vna.db`) instead: the main database (and its backups and Touchstone
+  files) for the switch, `duts.resonator_db_path()` for the resonator.
+  The calibration database stays beside the code; earlier runs stay in
+  `read_db.code_db_path()`.
 - Every run accumulates into that one database file. Each
   `run_twoport_sweep(...)` call is its own QCoDeS *experiment*, named
   `<date_str>_<temp_str>_<switch_serials>_<setup>_<cal|uncal>` with

@@ -12,6 +12,7 @@ and one checks ecal.py against scikit-rf's OnePort if that's installed.
     python -m pytest tests/test_ecal.py
 """
 
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -481,6 +482,7 @@ REGISTRY = {
                    "serial": "S1", "offset_mm": 0},
     "open_1": {"type": "open", "description": "SMA open", "part": "P-2", "serial": "S2"},
     "offset_60": {"type": "short", "description": "offset short", "offset_mm": 60.0},
+    "load_1": {"type": "load", "description": "SMA load", "part": "P-3", "serial": "S3"},
 }
 
 
@@ -814,7 +816,7 @@ def test_cal_standards_with_bad_labels_still_says_why(fridge, caldirs):
 # ---------------------------------------------------------------------------
 
 def test_kit_set_into_the_calibration_database(fridge, caldirs, monkeypatch):
-    """Notebook G1: kit runs, their files and the definitions all land in Sweeps/calibration/."""
+    """Notebook C1: kit runs, their files and the definitions all land in Sweeps/calibration/."""
     cal_dir, cal_db = caldirs
     monkeypatch.setattr(fridge, "db", cal_db)          # _run_kit passes fridge.db as db_path
     kit, _ = _run_kit(fridge, monkeypatch, channels=[1], touchstone=True)
@@ -882,3 +884,195 @@ def test_coverage_counts_distinct_standards_per_port_and_temperature(fridge, cal
     out = capsys.readouterr().out
     assert "RF2: 2 standard(s)" in out and "needs 1 more" in out
     assert ecal.standards_coverage(cal_db, temp_str="295K", verbose=False) == []
+
+
+# ---------------------------------------------------------------------------
+# Check standards in the DUT set, and comparing definitions
+# ---------------------------------------------------------------------------
+
+def _check_set(fridge, **kw):
+    """DUT on RF1, a flush short on RF3 and a load on RF5, all in one set in the main db."""
+    n = fridge.freq.size
+    fridge.dut[3] = np.full(n, -1 + 0j)
+    fridge.dut[5] = np.zeros(n, complex)
+    return _run_std(fridge, channels=[1, 3, 5], labels={1: "resonator"},
+                    cal_standards={3: "flat_short", 5: "load_1"}, db_path=fridge.db, **kw)
+
+
+def test_check_standards_ride_in_the_dut_set(fridge, caldirs, capsys):
+    _, cal_db = caldirs
+    cal = _check_set(fridge, repeats=2)
+    assert fridge.db.is_file() and not cal_db.exists()            # main db only
+    assert cal["labels"] == {1: "resonator", 3: "flat_short (short)", 5: "load_1 (load)"}
+    assert cal["cal_standards_info"][5]["type"] == "load"
+    assert cal["cal_standards_info"][3] == dict(REGISTRY["flat_short"], name="flat_short")
+    assert ecal.find_set(None, fridge.db) == cal                  # info survives the round trip
+
+    result = ecal.correct_set(cal, fridge.ideals_dir, db_path=fridge.db)
+    assert result["cal_standards_info"][3]["offset_mm"] == 0
+    capsys.readouterr()
+    chk = ecal.check_standards(result)
+    assert sorted(chk) == [3, 5]                                  # the DUT isn't scored
+    assert chk[3]["max_err"] < 1e-9 and chk[5]["max_err"] < 1e-9  # right definitions: exact
+    assert chk[3]["worst_deg"] < 1e-6 and chk[3]["repeat_spread"] < 1e-9
+    out = capsys.readouterr().out
+    assert "RF3 flat_short (short): |G - (-1)| worst" in out
+    assert "RF5 load_1 (load): |G - (0)| worst" in out and "worst load:" in out
+
+    # Wrong definitions ("perfect"): the scores are exactly how far off the standards read.
+    wrong = ecal.correct_set(cal, "perfect", db_path=fridge.db)
+    chk = ecal.check_standards(wrong, verbose=False)
+    np.testing.assert_allclose(chk[3]["max_err"], np.abs(wrong["ports"][3] + 1).max())
+    np.testing.assert_allclose(chk[5]["max_err"], np.abs(wrong["ports"][5]).max())
+    assert chk[3]["max_err"] > 1e-3
+
+    band = (1e9, 2e9)
+    f = wrong["freq"]
+    keep = (f >= band[0]) & (f <= band[1])
+    np.testing.assert_allclose(ecal.check_standards(wrong, band=band, verbose=False)[3]["max_err"],
+                               np.abs(wrong["ports"][3][keep] + 1).max())
+
+
+def test_check_standards_against_the_bench(fridge, caldirs, monkeypatch):
+    _, cal_db = caldirs
+    cal = _check_set(fridge)
+    result = ecal.correct_set(cal, fridge.ideals_dir, db_path=fridge.db)
+    bench = _bench(fridge, monkeypatch, cal_db, {"flat_short": fridge.dut[3] + 0.01})
+    chk = ecal.check_standards(result, bench, bench_db=cal_db, verbose=False)
+    np.testing.assert_allclose(chk[3]["bench_max"], 0.01, atol=1e-6)
+    assert "bench_max" not in chk[5]                              # no bench run for the load
+
+
+def test_check_standards_skips_the_ideal_for_an_offset_short(fridge, caldirs, capsys):
+    cal = _run_std(fridge, channels=[2], cal_standards={2: "offset_60"}, db_path=fridge.db)
+    chk = ecal.check_standards(ecal.correct_set(cal, fridge.ideals_dir, db_path=fridge.db))
+    assert "max_err" not in chk[2]
+    assert "bench only" in capsys.readouterr().out
+
+
+def _write_defs(folder, freq, defs_by_port):
+    folder.mkdir(parents=True, exist_ok=True)
+    for p, defs in defs_by_port.items():
+        for std, g in defs.items():
+            rows = "\n".join(f"{f:.1f} {z.real:.17e} {z.imag:.17e}" for f, z in zip(freq, g))
+            (folder / f"port{p}_{std}_tier2.s1p").write_text(f"# HZ S RI R 50\n{rows}\n")
+
+
+def test_compare_definitions_measures_the_map_between_them(fridge, tmp_path, capsys):
+    f = fridge.freq
+    a = fridge.ideals_dir
+    same = ecal.compare_definitions(a, a, f)
+    assert all(r["short_max"] < 1e-9 and r["load_max"] < 1e-9 for r in same.values())
+
+    # b = T(a) for a known Mobius T: correcting with b where a is right reads T(true).
+    T = lambda z: (z + 0.02) / (1 + 0.05 * z)
+    b = tmp_path / "b"
+    _write_defs(b, f, {p: {s: T(g) for s, g in ecal.load_ideals(a, p, f).items()} for p in range(1, 7)})
+    cmp_ = ecal.compare_definitions(a, b, f, ports=[1, 4])
+    assert sorted(cmp_) == [1, 4]
+    np.testing.assert_allclose(cmp_[1]["short_max"], abs(T(-1) + 1), rtol=1e-6)
+    np.testing.assert_allclose(cmp_[4]["load_max"], abs(T(0)), rtol=1e-6)
+    assert "RF4: short off by up to" in capsys.readouterr().out
+
+    # "perfect" on both sides: the load sits on the map's pole and must still come out exact.
+    zero = ecal.compare_definitions("perfect", "perfect", f, verbose=False)
+    assert all(np.isfinite(r["load_max"]) and r["load_max"] == 0 for r in zero.values())
+
+
+# ---------------------------------------------------------------------------
+# The measurement chain (metadata=) and which NIST definitions a label gets
+# ---------------------------------------------------------------------------
+
+def test_chain_metadata_goes_on_every_run_and_comes_back(fridge):
+    chain = {"lna_vd_v": 1.2, "lna_id_ma": 16, "port1_atten_db": 0, "lna": "LNF-LNC0.3_14B",
+             "lna_serial": None}                                # None: not recorded
+    cal = _run(fridge, channels=[1, 3], repeats=2, metadata=chain)
+    want = {"lna_vd_v": 1.2, "lna_id_ma": 16, "port1_atten_db": 0, "lna": "LNF-LNC0.3_14B"}
+    assert cal["metadata"] == want
+    assert ecal.find_set(None, fridge.db) == cal                 # round trip, metadata included
+
+    ids = [i for block in cal["repeats"] for part in block.values() for i in part.values()]
+    con = sqlite3.connect(fridge.db)
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(runs)")}
+        assert "lna_serial" not in cols
+        rows = con.execute(f"SELECT lna_vd_v, lna_id_ma, port1_atten_db, lna FROM runs "
+                           f"WHERE run_id IN ({','.join('?' * len(ids))})", ids).fetchall()
+    finally:
+        con.close()
+    assert len(rows) == len(ids) == 2 * (3 + 2 + 3)
+    assert set(rows) == {(1.2, 16, 0, "LNF-LNC0.3_14B")}
+
+
+def test_sets_without_metadata_give_an_empty_dict(fridge):
+    cal = _run(fridge, channels=[2])
+    assert cal["metadata"] == {}
+    assert ecal.find_set(None, fridge.db)["metadata"] == {}
+
+
+@pytest.mark.parametrize("metadata, err, match", [
+    ({"LNA_Vd": 1.2}, ValueError, "lowercase"),
+    ({"lna vd": 1.2}, ValueError, "lowercase"),
+    ({"cooldown": "CD5"}, ValueError, "records anyway"),
+    ({"mxc_temp_k": 3.0}, ValueError, "records anyway"),
+    ({"vna_power_dbm": -20}, ValueError, "records anyway"),
+    ({"ecal_note": "x"}, ValueError, "records anyway"),
+    ({"lna_on": True}, TypeError, "text or a number"),
+    ({"lna_bias": [1.2, 16]}, TypeError, "text or a number"),
+    ([("lna_vd_v", 1.2)], TypeError, "must be a dict"),
+])
+def test_bad_metadata_fails_before_anything_is_measured(fridge, metadata, err, match):
+    with pytest.raises(err, match=match):
+        _run(fridge, channels=[1], metadata=metadata)
+    assert fridge.positions == []
+
+
+@pytest.mark.parametrize("label, want, warns", [
+    ("295K", "295K", False), ("300K", "295K", False), ("295 K", "295K", False),
+    ("3K", "3K", False), ("4K", "3K", False), ("10mK", "3K", False), ("25mk", "3K", False),
+    ("0.01K", "3K", False),
+    ("60K", "3K", True), ("30K", "3K", True), ("77K", "3K", True),
+    ("base", "3K", True), ("", "3K", True),
+])
+def test_nist_definitions_for_a_temperature_label(label, want, warns, capsys):
+    assert ecal.nist_definitions_for(label) == want
+    assert ("[warning]" in capsys.readouterr().out) == warns
+
+
+def test_check_standards_against_a_bench_ecal(fridge, caldirs, capsys):
+    """The bench reference as a corrected e-cal set (switch on the bench, VNA cal kit not used)."""
+    _, cal_db = caldirs
+    n = fridge.freq.size
+    fridge.dut[2] = np.full(n, -1 + 0j)                           # bench: flat_short on RF2
+    fridge.dut[4] = np.zeros(n, complex)                          # load_1 on RF4
+    bench_cal = _run_std(fridge, channels=[2, 4], cal_standards={2: "flat_short", 4: "load_1"},
+                         cooldown="bench", n_ports=1, repeats=2)
+    assert ecal.find_set(None, cal_db)["cooldown"] == "bench"      # into the calibration db
+    bench = ecal.correct_set(bench_cal, fridge.ideals_dir, sparam="S11", db_path=cal_db)
+
+    cal = _check_set(fridge)                                       # fridge: same standards on RF3/RF5
+    result = ecal.correct_set(cal, fridge.ideals_dir, db_path=fridge.db)
+    chk = ecal.check_standards(result, bench)
+    np.testing.assert_allclose(chk[3]["bench_max"], 0, atol=1e-9)  # matched by name, not port
+    np.testing.assert_allclose(chk[5]["bench_max"], 0, atol=1e-9)
+    assert "against bench e-cal" in capsys.readouterr().out
+
+    fridge.dut[3] = np.full(n, -1 + 0j) + 0.01                     # the short moved by 0.01 cold
+    moved = ecal.correct_set(_run_std(fridge, channels=[3, 5],
+                                      cal_standards={3: "flat_short", 5: "load_1"},
+                                      db_path=fridge.db), fridge.ideals_dir, db_path=fridge.db)
+    chk = ecal.check_standards(moved, bench, verbose=False)
+    np.testing.assert_allclose(chk[3]["bench_max"], 0.01, atol=1e-9)
+    np.testing.assert_allclose(chk[5]["bench_max"], 0, atol=1e-9)
+
+
+def test_bench_that_misses_the_band_is_not_compared(fridge, caldirs, capsys):
+    cal = _check_set(fridge)
+    result = ecal.correct_set(cal, fridge.ideals_dir, db_path=fridge.db)
+    f = result["freq"]
+    half = f < f.mean()
+    bench = {"set": "x", "freq": f[half], "cal_standards": {3: "flat_short"},
+             "ports": {3: np.full(half.sum(), -1 + 0j)}}
+    chk = ecal.check_standards(result, bench)
+    assert "bench_max" not in chk[3] and "not compared" in chk[3]["bench_note"]
+    assert "not compared" in capsys.readouterr().out

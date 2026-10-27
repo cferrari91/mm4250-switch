@@ -20,13 +20,14 @@ All six live in this repo's `measurements/` folder:
 | `measurements/read_db.py` | reading it back -- `list_runs`, `load_run`, `export_touchstone` |
 | `measurements/plots.py` | looking at it -- `plot_measurement`, `plot_sweep`, `summarize` |
 | `measurements/ecal.py` | the fridge e-cal -- calibrated S11 at each channel's connector |
+| `measurements/duts.py` | section B, the resonator: its own database and the Q fit. The fit needs scikit-rf (`pip install scikit-rf` in `QTSF_QCoDeS_env`); the rest runs without it |
 | `measurements/mm4250_sweeps.ipynb` | the one notebook you run, for every kind of sweep |
-| `measurements/standards_example.json` | only for section G (calibration standards): copy it to `Sweeps\calibration\standards.json` and fill in your standards |
+| `measurements/standards_example.json` | for the check standards (A4) and section C: copy it to `Sweeps\calibration\standards.json` and fill in your standards |
 
 (`twoport_sweep.ipynb` and `oneport_sweep.ipynb` still work but are
 superseded by `mm4250_sweeps.ipynb`; no need to copy them.)
 
-**For the fridge e-cal (sections F and G) also copy NIST's standard
+**For the fridge e-cal (sections A and C) also copy NIST's standard
 definitions**, as folders beside the notebook:
 
 | From (on the laptop) | To (beside the notebook) |
@@ -131,36 +132,43 @@ Open `mm4250_sweeps.ipynb` from that folder in Jupyter, with
    so you can check them.
 2. **Connect** -- creates `ksvna` and `switch` (forces `ALL_OPEN`).
 3. **Session** -- `date_str` (defaults to today), `temp_str`,
-   `switch_serials`, and `CAL_SET`, the VNA cal set sections B/C use.
+   `switch_serials`, and `CAL_SET`, the VNA cal set D4 and C1 use (bench only, not the fridge).
    Everything below files its runs under these.
 4. **Stop here** -- raises on purpose, so *Run All* ends after Setup.
    Don't run it by hand; skip past it.
 
 **Then run one section by hand.** Each one starts by setting the VNA up
-itself (`setup_sweep` plus correction on or off), so the order doesn't
-matter:
+itself (`setup_sweep` plus correction on or off). For the cooldown, the
+table at the top of the notebook gives the order. Sections, top to bottom:
 
-- **A. 1-port sweep** -- S11 at each position, raw.
-- **B. 2-port sweep** -- S11/S12/S21/S22 with `CAL_SET` on. See
+- **A. Cooldown: DUTs in the fridge** -- A0 is the port map (what's on each
+  switch channel; nothing that moves the switch runs until it's filled
+  in). A4 `run_ecal_set(...)` measures one set (the
+  internal standards, every DUT and check-standard channel, the standards
+  again, `repeats` times) with correction off; A5 corrects it with NIST's
+  definitions (295 K or 3 K, from `temp_str`), plots calibrated S11 at each
+  channel's connector, and scores the check standards
+  (`ecal.check_standards`). One set per temperature. Also the stuck check (A1), the thru check through fridge
+  line RF3 (A2), the amplifier compression check (A3) and ALL_OPEN
+  before any temperature change (A6).
+- **B. Resonator** -- Q fit from A's sets, in its own database.
+- **C. Check standards and definitions (warm)** -- C0 the standards file,
+  C1 the bench reference (each check standard on the VNA's own cal, before
+  the switch is mounted; paste its printout into `BENCH` in A0), C2 your
+  own definitions from a cal kit on every port, compared with NIST's port
+  by port. Writes to its own database under `Sweeps\calibration\`.
+- **D. Bench** (VNA cabled straight to the switch, no fridge): **D1. Quick look**
+  (one measurement, nothing saved), **D2. 1-port sweep** (S11 at each
+  position), **D3** (one cable, the VNA's own 1-port cal, saved as
+  `Sweeps/no_switch/<NAME>_<date>_<temp>.s1p`, never overwritten),
+  **D4. 2-port sweep** (`MODE` = "cal", "uncal" or "both": the same
+  positions with `CAL_SET` on, then off). See
   [Calibrated sweeps](#calibrated-sweeps) below.
-- **C. Cal vs. uncal** -- one channel measured with the cal set on, then
-  off.
 - **E. Browse and plot** -- any runs from any session.
-- **F. DUTs in the fridge** -- F2 `run_ecal_set(...)` measures one set (the
-  internal standards, every DUT channel, the standards again, `repeats`
-  times) with correction off; F3 corrects it with NIST's definitions and
-  plots calibrated S11 at each channel's connector. One set per
-  temperature. Also the stuck check (F1) and ALL_OPEN before any
-  temperature change (F4).
-- **G. Switch internal calibration** -- your own definitions from a cal
-  kit (warm), known standards left on ports through a cooldown, the
-  bench reference and scoring, and what's been collected so far. Writes
-  to its own database under `Sweeps\calibration\`.
 
 Also there: **Check the VNA** (cal sets, settings, correction state),
-**Quick look** (one measurement, nothing saved), **Close** (VNA output
-off, switch `ALL_OPEN`, instruments released) and the hidapi debugging
-cells.
+**Close** (VNA output off, switch `ALL_OPEN`, instruments released) and
+the hidapi debugging cell.
 
 No paths to edit. The notebook works out where it is on its own.
 
@@ -178,19 +186,35 @@ Users\Charlie_Ferrari\
     plots.py
     ecal.py
     mm4250_sweeps.ipynb
-    ideals_3K\  ideals_295K\                       <- NIST definitions, for sections F and G
-    mm4250_sweeps.db                                 <- every sweep, always
+    ideals_3K\  ideals_295K\                       <- NIST definitions, for sections A and C
+    mm4250_sweeps.db                                 <- every sweep before cooldown 5 (code_db_path())
     db_backups\mm4250_sweeps_<YYYYMMDD-HHMMSS>.db   <- snapshot after each sweep and at Close (newest 10 kept)
     Sweeps\<serials>\<date>\<temp>\<setup>_<cal|uncal>\RF<n>_run<id>.s2p   <- only with touchstone=True
     Sweeps\<serials>\<date>\<temp>\ecal_corrected_<set>\RF<n>.s1p       <- ecal.export_corrected
     figures\<serials>\<date>\<temp>\                <- plots saved with save=, and a day's
                                                        slide-figure set with its make_figures.py
-    Sweeps\calibration\                               <- section G only: calibration-standards sets
+    Sweeps\calibration\                               <- section C: bench and kit runs, standards.json
         mm4250_calibration.db                           <- their own database
         db_backups\mm4250_calibration_<...>.db          <- its snapshots
         standards.json                                  <- the standards you own (copy standards_example.json)
         <serials>\<date>\<temp>\ecal_uncal\...         <- only with touchstone=True
 ```
+
+**From cooldown 5, the switch's and the resonator's runs go to the lab's
+databases, not beside the code.** The framework's `scripts\database_helper.py`
+(guide `docs\Database_Instructions.md`) gives each project one database per
+cooldown and `name`,
+`E:\QCoDeS\<project>\Cooldown_<NN>\<project>_Cooldown_<NN>_<name>.db`
+(folders made on first use). The notebook's Setup cell **Databases** calls
+`use_lab_databases(COOLDOWN_NUM, SWITCH_PROJECT, RESONATOR_PROJECT,
+name="vna")` once per kernel (again after a restart): every switch run
+(and its `db_backups\`, and Touchstone files) goes to the switch project's
+database, section B's resonator copies and fits to the resonator project's.
+Change `COOLDOWN_NUM` each cooldown. Section C's calibration database stays
+in `Sweeps\calibration\` here (its bench runs are used across cooldowns),
+and every earlier run stays in `mm4250_sweeps.db` here: read it with
+`db_path=code_db_path()`. Without that cell (the laptop), everything goes
+beside the code as below.
 
 **The database is the record; `.s2p` files are optional.** Every number a
 Touchstone file would hold is in `mm4250_sweeps.db` at full precision,
@@ -257,7 +281,7 @@ The VNA applies its own saved calibration. Nothing is corrected in
 Python -- the code turns the instrument's correction on or off and
 records which one it was.
 
-Sections B and C sweep 1 MHz-10 GHz, 10000 points, IF bandwidth
+D4 sweeps 1 MHz-10 GHz, 10000 points, IF bandwidth
 1 kHz, -20 dBm, matching cal set `20260911_1MHz_10GHz_female` (2-port,
 reference plane at the cable ends that mate with the switch):
 
