@@ -16,3 +16,6 @@ measurements/fit_resonator_q.py
 measurements/q_*.ipynb
 measurements/figures/**/*q_fit*
 measurements/figures/**/*qfit*
+
+# superseded notebooks, kept local only (2026-10-29)
+measurements/archive/
