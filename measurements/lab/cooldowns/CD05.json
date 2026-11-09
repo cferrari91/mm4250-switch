@@ -1,0 +1,33 @@
+{
+  "cooldown": 5,
+  "switch_serial": "SN0077",
+  "database_project": "MM4250",
+  "ports": {
+    "RF1": "flush short",
+    "RF2": "thru: fridge line RF3",
+    "RF3": "50 ohm load (ANNE-50X+) via bias tee",
+    "RF4": "resonator",
+    "RF5": "load_1",
+    "RF6": "load_att20"
+  },
+  "thru_channel": 2,
+  "lines": {
+    "input": "RF6",
+    "return": "RF2",
+    "thru": "RF3",
+    "notes": "one LNA (LNF-LNC0.3_14B s/n 5858H) on the return line"
+  },
+  "sweep": {
+    "start_hz": 510000000,
+    "stop_hz": 610000000,
+    "points": 2001,
+    "if_bandwidth_hz": 1000,
+    "power_dbm": -20
+  },
+  "repeats": 1,
+  "correct_sparam": "S21",
+  "stuck_check": {
+    "pass_db": null,
+    "thru_pass_db": 20
+  }
+}
