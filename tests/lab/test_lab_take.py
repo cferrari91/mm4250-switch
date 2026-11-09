@@ -148,6 +148,20 @@ def test_definitions_follow_the_temperature(cfg, rig, dbpath):
     assert ecal.correct_take(take)["definitions"] == "NIST 295K"
     take["temp_k"] = 0.012
     assert ecal.correct_take(take)["definitions"] == "NIST 3K"
+    assert ecal.correct_take(take)["chosen"] == "auto"
+
+
+def test_in_between_temperature_saves_raw_only_unless_chosen_by_hand(cfg, rig, dbpath, ideals, capsys):
+    t = _take(cfg, rig, dbpath, channels=[4])
+    take = db.load_take(t["take_id"], dbpath)
+    take["temp_k"] = 60.0                                   # on the way down: no NIST set fits
+    assert ecal.correct_take(take) is None
+    assert "NOTHING WAS CORRECTED" in capsys.readouterr().out
+    result = ecal.correct_take(take, ideals)                # by hand: corrected, and says so
+    assert result["chosen"] == "by hand"
+    ids = db.save_corrected(dbpath, result, take)
+    again = db.load_take(t["take_id"], dbpath)
+    assert [c["meta"]["definitions_chosen"] for c in again["corrected"]] == ["by hand"] * len(ids)
 
 
 def test_corrected_runs_link_to_their_raw_runs_and_refuse_duplicates(cfg, rig, dbpath, ideals):

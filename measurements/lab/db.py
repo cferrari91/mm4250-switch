@@ -412,6 +412,7 @@ def save_corrected(db_path, result, take, files=False):
                     "start_temp_k": take["temp_k"], "temp_str": take["temp_str"],
                     "mxc_temp_k": raw_meta.get("mxc_temp_k"), "note": raw_meta.get("note"),
                     "cooldown_json": cfg["_text"], "definitions": result["definitions"],
+                    "definitions_chosen": result.get("chosen"),
                     "definitions_dir": Path(result["definitions_dir"]).name,
                     "corrected_from": result["sparam"], "fmin_hz": result["fmin_hz"],
                     "source_run_ids": json.dumps(src[ch])}
@@ -565,7 +566,7 @@ def load_run(run_id, db_path):
 
 _META = ("take_id", "check_id", "check_type", "kind", "standards_when", "repeat", "step",
          "position", "channel", "port", "mxc_temp_k", "start_temp_k", "temp_str", "note",
-         "definitions", "corrected_from", "source_run_ids", "cooldown_json", "switch_serial")
+         "definitions", "definitions_chosen", "corrected_from", "source_run_ids", "cooldown_json", "switch_serial")
 
 
 def _run_rows(db_path, where, params):

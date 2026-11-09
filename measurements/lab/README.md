@@ -46,10 +46,10 @@ On the way down (30-80 K, where trapped nitrogen can freeze a switch closed) and
 ## 3. Take data (`take_data.ipynb`)
 
 - **Take**: the internal standards, each chosen channel (`CHANNELS = None` for every port in the file, or e.g. `[4]`), the standards again (the drift check), `repeats` times. Every position is saved raw (S11, S12, S21, S22) to `<project>_Cooldown_<NN>_vna.db` as soon as it's measured. Then each channel is corrected with NIST's definitions (295 K at room temperature, 3 K when cold, picked from the fridge's mixing-plate reading) and saved as its own runs, one per channel per repeat, each linked to the raw runs it came from (`source_run_ids`).
-- No fridge reading (no VPN)? The raw data is still saved; the correction is skipped with a warning. Set `DEFINITIONS = "295K"` or `"3K"` in the Take cell, or correct it later with `CORRECT_WITH` in Recall.
+- No fridge reading (no VPN), or a temperature between 4.5 K and 250 K (where neither NIST set fits)? The raw data is still saved; the correction is skipped with a warning. Set `DEFINITIONS = "295K"` or `"3K"` in the Take cell, or correct it later with `CORRECT_WITH` in Recall; those runs say `definitions_chosen` = `by hand` (vs `auto`).
 - The printout ends with the **drift**: how far the standards moved during the take, in reflection units. NIST's repeatability was a few 1e-2; much more means the chain (usually the LNA) moved: take it again.
 - **Plot latest take**: raw trace on the left, corrected on the right (mean over repeats).
-- **Recall**: lists every take in the database; plots one (`TAKE_ID`, `None` = newest) or a list of runs (`RUN_IDS`); `EXPORT = True` writes Touchstone files to `Sweeps/export/` beside the database.
+- **Recall**: needs only Setup (no instruments). Lists every take in the database; plots one (`TAKE_ID`, `None` = newest) or a list of runs (`RUN_IDS`); `EXPORT = True` writes Touchstone files to `Sweeps/export/` beside the database.
 - **Close**: backs up the database, leaves the switch `ALL_OPEN`, releases the instruments.
 
 ## Where the data is
@@ -57,7 +57,7 @@ On the way down (30-80 K, where trapped nitrogen can freeze a switch closed) and
 - On the DAQ: `E:\QCoDeS\<project>\Cooldown_<NN>\`, through the lab's `scripts/database_helper.py`. `..._vna.db` (takes) and `..._stuck.db` (checks) are separate files, so the two notebooks never write to the same one.
 - Beside each database: `db_backups/` (a checked copy after every take and in Close, newest 10 kept) and `Sweeps/` (Touchstone files and figures, only when asked).
 - If the helper can't be found (a laptop), the database goes to `local_databases/` beside this file, with a loud warning. On the DAQ that warning means something is wrong: stop and check.
-- Each run's metadata: `take_id` (or `check_id`), `kind` (`standard`, `raw`, `corrected`), `position`, `standards_when` (`before`/`after`), `repeat`, `port` (from the file), `mxc_temp_k` (mixing plate, before each position; empty if no reading), `temp_str`, `cooldown`, `switch_serial`, `note`, `cooldown_json`, the VNA's settings (`vna_*`), and on corrected runs `definitions`, `corrected_from` and `source_run_ids`. Browse with `plottr-inspectr --db <file>` or Recall.
+- Each run's metadata: `take_id` (or `check_id`), `kind` (`standard`, `raw`, `corrected`), `position`, `standards_when` (`before`/`after`), `repeat`, `port` (from the file), `mxc_temp_k` (mixing plate, before each position; empty if no reading), `temp_str`, `cooldown`, `switch_serial`, `note`, `cooldown_json`, the VNA's settings (`vna_*`), and on corrected runs `definitions`, `definitions_chosen` (`auto` or `by hand`), `corrected_from` and `source_run_ids`. Browse with `plottr-inspectr --db <file>` or Recall.
 - NIST's definitions: the code looks for `ideals_295K/` and `ideals_3K/` (copies of NIST's `tier2_scikitrf_caldata/tier2_295k1` and `tier2_3k1`) in this folder or any folder above it.
 
 ## Safety (built in, don't work around it)

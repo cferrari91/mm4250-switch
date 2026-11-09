@@ -93,8 +93,9 @@ def nist_definitions_for(temperature):
     "295K" or "3K": which of NIST's definitions fits a temperature, given
     in kelvin (a number) or as a label ("295K", "10mK"). 295K from 250 K
     up, 3K at 4.5 K and below. In between (30-80 K on the way down)
-    nothing fits: a loud warning and "3K", so the correction runs but is
-    rough. None (no reading) -> None.
+    nothing fits: a loud warning and None, so correct_take saves the raw
+    data only (pass definitions= yourself for a rough correction). None
+    (no reading) -> None.
     """
     if temperature is None:
         return None
@@ -110,8 +111,8 @@ def nist_definitions_for(temperature):
     if kelvin <= 4.5:
         return "3K"
     print(f"[WARNING] {kelvin:.3g} K: NIST's definitions exist for 295 K and 3 K (3 K holds "
-          "to 25 mK) only. This uses the 3K ones and the correction is rough: don't quote it.")
-    return "3K"
+          "to 25 mK) only, so none are picked automatically here.")
+    return None
 
 
 def find_definitions(which, start=None):
@@ -204,9 +205,11 @@ def correct_take(take, definitions=None, sparam=None, fmin=FMIN_HZ, start=None):
 
     definitions: "295K" / "3K" (NIST's, found with find_definitions), a
     folder path, or None = pick from the take's temperature
-    (nist_definitions_for). With no temperature and no definitions given,
+    (nist_definitions_for: 295K from 250 K up, 3K at 4.5 K and below).
+    With no temperature, or one in between, and no definitions given,
     nothing is corrected: prints why and returns None (the raw runs are
     already saved; correct later with definitions="295K" or "3K").
+    The result's "chosen" says "auto" (from the temperature) or "by hand".
     sparam: the raw trace to solve on; None = the cooldown file's
     correct_sparam (S21 in the circulator wiring).
 
@@ -215,12 +218,15 @@ def correct_take(take, definitions=None, sparam=None, fmin=FMIN_HZ, start=None):
     "raw": [{ch: raw trace}, ...], "terms": [{ch: error terms}, ...],
     "sources": [{ch: [raw run ids used]}, ...], "ports" {ch: description}}.
     """
+    chosen = "by hand" if definitions is not None else "auto"
     if definitions is None:
         definitions = nist_definitions_for(take["temp_k"])
         if definitions is None:
-            print("[WARNING] No fridge temperature for this take, so no definitions were "
-                  "picked and NOTHING WAS CORRECTED. The raw runs are saved. Set "
-                  "DEFINITIONS = \"295K\" or \"3K\" and correct it from Recall.")
+            why = ("No fridge temperature for this take" if take["temp_k"] is None else
+                   f"The take started at {take['temp_k']:.3g} K, where neither NIST set fits")
+            print(f"[WARNING] {why}, so no definitions were picked and NOTHING WAS CORRECTED. "
+                  "The raw runs are saved. To correct anyway, set CORRECT_WITH = \"295K\" "
+                  "or \"3K\" in Recall (saved as chosen by hand).")
             return None
     if str(definitions).strip().upper() in ("295K", "3K"):
         label = f"NIST {str(definitions).strip().upper()}"
@@ -257,7 +263,8 @@ def correct_take(take, definitions=None, sparam=None, fmin=FMIN_HZ, start=None):
         terms_out.append(tm)
         sources.append(src)
     return {"take_id": take["take_id"], "freq": freq[keep], "sparam": sparam,
-            "definitions": label, "definitions_dir": str(folder), "corrected": corrected,
+            "definitions": label, "chosen": chosen, "definitions_dir": str(folder),
+            "corrected": corrected,
             "raw": raw, "terms": terms_out, "sources": sources, "fmin_hz": fmin,
             "ports": {ch: take["cfg"]["ports"].get(f"RF{ch}") for ch in take["channels"]}}
 

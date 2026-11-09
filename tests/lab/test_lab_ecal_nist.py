@@ -65,7 +65,7 @@ def test_nist_definitions_for():
     assert ecal.nist_definitions_for(295.3) == "295K"
     assert ecal.nist_definitions_for("10mK") == "3K"
     assert ecal.nist_definitions_for(None) is None
-    assert ecal.nist_definitions_for(60.0) == "3K"            # with a warning
+    assert ecal.nist_definitions_for(60.0) is None            # in between: a warning, nothing picked
     with pytest.raises(ValueError):
         ecal.nist_definitions_for("warm")
 
