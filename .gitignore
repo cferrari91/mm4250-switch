@@ -17,6 +17,5 @@ measurements/q_*.ipynb
 measurements/figures/**/*q_fit*
 measurements/figures/**/*qfit*
 
-# DUT code (section H): kept local for now (2026-10-12)
-measurements/duts.py
-tests/test_duts.py
+# superseded notebooks, kept local only (2026-10-29)
+measurements/archive/

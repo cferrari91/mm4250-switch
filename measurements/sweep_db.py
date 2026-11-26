@@ -72,12 +72,16 @@ delay per trace, and so on), so a run can be audited later instead of
 taken on trust.
 """
 
+import importlib
 import json
 import os
+import re
 import sqlite3
+import sys
 from datetime import datetime
 from pathlib import Path
 
+import qcodes
 from qcodes.dataset import (
     Measurement,
     initialise_or_create_database_at,
@@ -107,9 +111,11 @@ from read_db import (  # noqa: F401
     DEFAULT_DB_NAME,
     DEFAULT_OUT_DIR_NAME,
     default_cal_db_path,
+    default_db_path,
     files_root,
     load_standards,
     TOUCHSTONE_2PORT_ORDER,
+    use_databases,
     backup_db,
     save_touchstone,
     sweep_folder,
@@ -142,13 +148,112 @@ def _default_cal_db_path():
 
 def _default_db_path():
     """
-    Path to the shared database: mm4250_sweeps.db, in the same folder as
-    these files.
+    Path to the main database: read_db.default_db_path(), i.e. this
+    session's lab database once use_lab_databases() has run, otherwise
+    mm4250_sweeps.db in the same folder as these files.
 
     Resolved from this file's location rather than the working directory,
     so every notebook that calls this writes to the same one file.
     """
-    return Path(__file__).resolve().parent / DEFAULT_DB_NAME
+    return default_db_path()
+
+
+# ---------------------------------------------------------------------------
+# The lab's databases (DAQ, from cooldown 5)
+# ---------------------------------------------------------------------------
+
+DATABASE_HELPER_MODULE = "scripts.database_helper"   # the framework's scripts/database_helper.py
+LAB_DB_NAME = "vna"   # the helper's `name`: picks the file in the cooldown folder (..._Cooldown_05_vna.db)
+
+
+def find_setup_database(framework_root=None):
+    """
+    setup_database from the lab framework's scripts/database_helper.py,
+    imported as scripts.database_helper (the way the framework's
+    QCodesStationSetup imports it). framework_root: the
+    QCoDeS-Measurement-Framework checkout; None = the first folder above
+    these files that has a scripts/ folder (on the DAQ, two up from
+    Users/Charlie_Ferrari/).
+    """
+    if framework_root is None:
+        here = Path(__file__).resolve().parent
+        framework_root = next((p for p in (here, *here.parents) if (p / "scripts").is_dir()), None)
+        if framework_root is None:
+            raise FileNotFoundError(
+                f"no scripts/ folder above {here}: setup_database is the lab framework's "
+                "(DAQ). On a laptop, skip use_lab_databases to keep the databases beside "
+                "these files.")
+    framework_root = Path(framework_root).resolve()
+    helper = framework_root / "scripts" / "database_helper.py"
+    if not helper.is_file():
+        raise ImportError(
+            f"no {helper}: this framework checkout predates the database helper -- "
+            "pull the framework's main")
+    if str(framework_root) not in sys.path:
+        sys.path.insert(0, str(framework_root))
+    return importlib.import_module(DATABASE_HELPER_MODULE).setup_database
+
+
+def _lab_db(setup_database, project, cooldown, name):
+    """
+    setup_database(project, cooldown, name=name) for one project, and the
+    database it made: its return value (a Path), checked against QCoDeS's
+    db_location, which it also sets.
+    """
+    ret = setup_database(project, cooldown=cooldown, name=name)
+    if isinstance(ret, tuple):           # (path, experiment) if it was given an experiment
+        ret = ret[0]
+    active = qcodes.config["core"]["db_location"]
+    if not isinstance(ret, (str, os.PathLike)) or Path(ret).resolve() != Path(active).resolve():
+        raise RuntimeError(
+            f"setup_database({project!r}, cooldown={cooldown}, name={name!r}) returned "
+            f"{ret!r} but QCoDeS records to {active!r}; the helper has changed. "
+            "Nothing was redirected.")
+    return Path(ret).resolve()
+
+
+def use_lab_databases(cooldown, switch_project, resonator_project, name=LAB_DB_NAME,
+                      setup_database=None, framework_root=None):
+    """
+    Point this session at the lab's databases (the framework's
+    scripts/database_helper.py, guide docs/Database_Instructions.md):
+    E:\\QCoDeS\\<project>\\Cooldown_<NN>\\<project>_Cooldown_<NN>_<name>.db on the
+    DAQ, folders made on first use. Run once per kernel, in Setup, before
+    anything is measured:
+
+      switch_project     the main database: every switch run (sections A,
+                         D, E, the stuck/thru checks, the check standards)
+      resonator_project  section B's database: the resonator's copied raw
+                         runs and its fits (duts.resonator_db_path)
+      name               the helper's `name` for both (default "vna": what
+                         kind of measurement; the lab's guide says always
+                         give one, and every notebook using the same
+                         project + cooldown + name shares one file)
+
+    The switch project goes last, so it is also QCoDeS's current database
+    afterwards. The calibration database (section C, Sweeps/calibration/
+    beside these files) is left where it is: its bench runs and kit
+    definitions are referenced across cooldowns. Runs from before this
+    (the 295 K runs, everything before cooldown 5) stay in read_db.code_db_path().
+    Touchstone files and db_backups/ go beside each database, i.e. in the
+    cooldown folder.
+
+    Returns {"main": Path, "resonator": Path}. setup_database: the helper
+    itself (None = find_setup_database(framework_root)).
+    """
+    if setup_database is None:
+        setup_database = find_setup_database(framework_root)
+    paths = {"resonator": _lab_db(setup_database, resonator_project, cooldown, name),
+             "main": _lab_db(setup_database, switch_project, cooldown, name)}
+    if paths["main"] == paths["resonator"]:
+        raise RuntimeError(f"both projects came back as the same database, {paths['main']}; "
+                           "give them different project names. Nothing was redirected.")
+    use_databases(main=paths["main"], resonator=paths["resonator"])
+    print(f"Cooldown {cooldown} databases:")
+    print(f"  switch    ({switch_project}): {paths['main']}")
+    print(f"  resonator ({resonator_project}): {paths['resonator']}")
+    print(f"  calibration (unchanged): {_default_cal_db_path()}")
+    return paths
 
 
 def _as_dict(data):
@@ -523,7 +628,10 @@ def run_sweep(positions, date_str, temp_str, switch_serials, n_ports=2,
         exp_name = f"{date_str}_{temp_str}_{switch_serials}_{group}"
     exp, db_path = _open_experiment(switch_serials, db_path, exp_name)
 
-    out_root = Path(out_root) if out_root is not None else _default_out_root()
+    # Files follow the database they belong to (Sweeps/ beside it), as
+    # export_touchstone and run_kit_set already do; for the database beside
+    # these files that is the same folder as before.
+    out_root = Path(out_root) if out_root is not None else files_root(db_path)
     sweep_dir = sweep_folder(out_root, switch_serials, date_str, temp_str, group)
     print(f"  VNA correction is {'ON' if cal == 'cal' else 'OFF'} -> group {group!r}"
           + (f", files in {sweep_dir}" if touchstone else " (database only)"))
@@ -734,7 +842,7 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
                  repeats=1, mxc_temp_k=None, note=None, labels=None, terminations=None,
                  cal_standards=None, cooldown=None, standards_file=None, temp_reader=None,
                  n_ports=2, vna_cal=False, setup="ecal", touchstone=False, out_root=None,
-                 db_path=None, vna=None, switch=None):
+                 db_path=None, metadata=None, vna=None, switch=None):
     """
     Measure one complete e-cal set: the raw switch's internal standards,
     then each RF channel, then the standards again. ecal.correct_set()
@@ -794,6 +902,17 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
     position and saved on each run as mxc_temp_k. Pass it or `mxc_temp_k`,
     not both. `cooldown` can be given for any set, not just standards sets.
 
+    `metadata` is for the rest of the measurement chain that the VNA can't
+    report, as {key: value}, e.g. {"lna_vd_v": 1.2, "lna_id_ma": 16,
+    "port1_atten_db": 0}: the LNA's bias, attenuators added outside the
+    fridge. Each key is saved on every run of the set (a column in the
+    runs table, so plottr and a plain sqlite query show it), and the whole
+    dict as `ecal_metadata` (JSON), which ecal.find_set gives back as
+    "metadata". Keys are lowercase names (letters, digits, `_`) that don't
+    clash with what the set records anyway (`ecal_*`, `vna_*`, `cal_std*`,
+    `cooldown`, `mxc_temp_k`, ...); values are text or numbers; None
+    values are skipped (not recorded). All checked before anything moves.
+
     One call per temperature. `n_ports=2` (the default) saves all four
     S-parameters at every position, for the fridge's circulator wiring:
     VNA port 1 -> circulator -> RFC, the reflection back up to VNA port 2,
@@ -839,6 +958,7 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
         ecal_terminations, termination     if `terminations` or `cal_standards` given
         cooldown      if given
         cal_standards, cal_std, cal_std_*  if `cal_standards` given (see above)
+        ecal_metadata, and each of its keys  if `metadata` given (see above)
 
     and filed like any sweep, under the group "<setup>_uncal" (default
     "ecal_uncal"). Runs from several sets on the same date/temp share an
@@ -854,7 +974,8 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
         {"set": "20261015T141502.318", "switch_serials": ..., "date_str": ...,
          "temp_str": ..., "labels": {1: "resonator", ...},
          "terminations": {2: "short", ...}, "cal_standards": {1: "flat_short", ...},
-         "cooldown": "CD1" or None, "repeats": [
+         "cooldown": "CD1" or None, "metadata": {"lna_vd_v": 1.2, ...} or {},
+         "repeats": [
              {"before": {"ALL_OPEN": 101, "INTERNAL_SHORT": 102, ...},
               "ports":  {1: 104, 2: 105, ...},
               "after":  {"ALL_OPEN": 110, ...}},
@@ -875,6 +996,7 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
         raise ValueError(f"cooldown must be a non-empty label like 'CD1', got {cooldown!r}")
     cooldown = cooldown.strip() if cooldown else None
     terminations = _check_terminations(terminations)
+    extra = _check_set_metadata(metadata)
 
     std_names, std_records = {}, {}
     if cal_standards is not None:
@@ -920,7 +1042,9 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
                                   if terminations is not None else None),
             "cal_standards": (json.dumps({str(ch): dict(std_records[ch], name=std_names[ch])
                                           for ch in std_names})
-                              if std_names else None)}
+                              if std_names else None),
+            "ecal_metadata": json.dumps(extra) if extra else None,
+            **extra}
     port_tags = {}
     for ch in channels:
         t = {}
@@ -935,12 +1059,14 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
     print(f"E-cal set {set_id}: {repeats} repeat(s), channels {channels}, {n_ports}-port"
           + (", VNA cal ON underneath" if vna_cal else "")
           + (f", cooldown {cooldown}" if cooldown else ""))
+    if extra:
+        print("  chain: " + ", ".join(f"{k}={v}" for k, v in extra.items()))
     for ch in channels:
         bits = [x for x in (labels.get(ch), (terminations or {}).get(ch)) if x]
         if bits:
             print(f"  RF{ch}: {' / '.join(dict.fromkeys(bits))}")
     if std_names:
-        print(f"  calibration standards -> {Path(db_path).resolve()}")
+        print(f"  standards' runs -> {Path(db_path).resolve()}")
 
     repeats_out = []
     try:
@@ -970,7 +1096,46 @@ def run_ecal_set(date_str, temp_str, switch_serials, channels=(1, 2, 3, 4, 5, 6)
     return {"set": set_id, "switch_serials": switch_serials, "date_str": date_str,
             "temp_str": temp_str, "labels": dict(labels),
             "terminations": dict(terminations or {}), "cal_standards": dict(std_names),
-            "cooldown": cooldown, "repeats": repeats_out}
+            "cal_standards_info": {ch: dict(std_records[ch], name=std_names[ch]) for ch in std_names},
+            "cooldown": cooldown, "metadata": dict(extra), "repeats": repeats_out}
+
+
+# Metadata every e-cal run already carries (run_ecal_set, run_sweep,
+# record_measurement), so a `metadata=` key can't overwrite or collide
+# with one: a clash would otherwise only fail at the first save, after
+# the switch has moved.
+_SET_METADATA_RESERVED = {
+    "channel", "state", "switch_serials", "date_str", "temp_str", "dut_label",
+    "mxc_temp_k", "cooldown", "termination", "cal_standards", "touchstone_path",
+    "n_ports", "cal_role",
+}
+_SET_METADATA_RESERVED_PREFIXES = ("ecal_", "vna_", "cal_std", "kit_", "source_", "fit_")
+
+
+def _check_set_metadata(metadata):
+    """
+    run_ecal_set's `metadata`, checked before anything moves: a dict of
+    lowercase keys to text or numbers. Returns it without the None values
+    (in the order given). None -> {}.
+    """
+    if metadata is None:
+        return {}
+    if not hasattr(metadata, "items"):
+        raise TypeError(f"metadata must be a dict like {{'lna_vd_v': 1.2}}, got {metadata!r}")
+    out = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", key):
+            raise ValueError(f"metadata key {key!r}: use lowercase letters, digits and _ "
+                             "(it becomes a database column)")
+        if key in _SET_METADATA_RESERVED or key.startswith(_SET_METADATA_RESERVED_PREFIXES):
+            raise ValueError(f"metadata key {key!r} is one the set records anyway; "
+                             "pick another name")
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            raise TypeError(f"metadata[{key!r}] must be text or a number, got {value!r}")
+        out[key] = value
+    return out
 
 
 # The external cal kit's standards, in the order run_kit_set asks for them.
@@ -1007,7 +1172,7 @@ def run_kit_set(date_str, temp_str, switch_serials, channels=(1,), note=None, n_
     kit_std on the kit runs, kit_note if given, and dut_label "kit open"
     etc. on the kit runs, and filed under the group "<setup>_uncal"
     ("<setup>_cal" with vna_cal=True). With db_path pointing at the
-    calibration database (read_db.default_cal_db_path(), notebook G1),
+    calibration database (read_db.default_cal_db_path(), notebook C1),
     touchstone files go under Sweeps/calibration/ too, and make_ideals
     writes the definitions beside that database.
 
@@ -1071,7 +1236,7 @@ def run_kit_set(date_str, temp_str, switch_serials, channels=(1,), note=None, n_
 def run_bench_standards(names, date_str, temp_str="295K", note=None, standards_file=None,
                         db_path=None, vna=None):
     """
-    Bench reference for checking definitions (notebook G3): each named
+    Bench reference for checking definitions (notebook C3): each named
     standard measured straight on VNA port 1's cable with the VNA's own
     calibration on, no switch and no circulator, so there's a "truth" to
     compare the e-cal's result for the same standard against.

@@ -538,3 +538,98 @@ def plot_sweep(sweep, sparam=None, ax=None, title=None, db_path=None,
     _save(ax.figure, save, _sweep_file_name(sparam, plotted),
           [t["where"] for t in plotted])
     return ax
+
+
+# ---------------------------------------------------------------------------
+# Stuck check (stuck_check_basic.ipynb)
+# ---------------------------------------------------------------------------
+
+def stuck_check_folders(root):
+    """Every stuck-check folder under `root`/Sweeps/stuck_check/, oldest first."""
+    base = Path(root) / read_db.DEFAULT_OUT_DIR_NAME / "stuck_check"
+    return sorted(p for p in base.iterdir() if (p / "positions.csv").is_file()) if base.is_dir() else []
+
+
+def plot_stuck_check(folder, save=True):
+    """
+    One bar per step of a stuck check, from the folder's positions.csv and
+    .s2p files (no instruments, no database): how far that step's raw S21
+    moved from the first ALL_OPEN, in dB above the usual ALL_OPEN-to-ALL_OPEN
+    difference. Closed positions are blue bars, ALL_OPEN steps grey dots.
+
+    Reading it: a tall blue bar = that position closed; a grey dot back at
+    about 0 = the switch opened again. A blue bar near 0 = it didn't close
+    (stuck open); a grey dot that stays high = the position before it
+    didn't open (stuck closed).
+
+    save=True writes stuck_check.png into the folder (never overwrites:
+    stuck_check_2.png, ... if one is there). Returns the Axes.
+    """
+    import csv
+
+    folder = Path(folder)
+    with open(folder / "positions.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        raise ValueError(f"{folder / 'positions.csv'} has no rows")
+    diff = np.array([float(r["median_abs_S21_minus_first_open"]) for r in rows])
+    is_open = np.array([r["position"] == "ALL_OPEN" for r in rows])
+
+    # The usual difference between two ALL_OPENs, from every ALL_OPEN after
+    # the first one (the reference itself, which reads 0). The quietest
+    # quarter, not the median: after a stuck-closed channel every later
+    # ALL_OPEN reads high, and those must not set the scale.
+    later_opens = diff[1:][is_open[1:]]
+    spread = float(np.percentile(later_opens, 25)) if later_opens.size else 0.0
+    if not spread > 0:                       # noiseless (only in tests): 60 dB below the biggest step
+        spread = float(np.max(diff)) * 1e-3 if np.max(diff) > 0 else 1.0
+    level = np.full(len(diff), np.nan)
+    # Floored at -6 dB: an ALL_OPEN closer to the first one than usual is just "back at 0".
+    level[1:] = np.maximum(20 * np.log10(np.maximum(diff[1:], 1e-300) / spread), -6.0)
+
+    names = {"ALL_OPEN": "Open", "INTERNAL_SHORT": "Internal\nshort", "INTERNAL_LOAD": "Internal\nload"}
+    labels = [names.get(r["position"], r["position"]) for r in rows]
+    labels[0] = "Open\n(start)"
+    temp = next((r["mxp_K"] for r in rows if r.get("mxp_K")), "")
+    if temp:
+        t = float(temp)
+        temp = f"{t * 1e3:.0f} mK" if t < 1 else f"{t:.1f} K"
+
+    blue, grey, ink2, grid, rim = "#2a78d6", "#8a8983", "#52514e", "#e4e3df", "#c3c2b7"
+    fig, ax = plt.subplots(figsize=(12, 5))
+    x = np.arange(len(rows))
+    closed = ~is_open
+    closed[0] = False
+    ax.bar(x[closed], level[closed], width=0.72, color=blue, edgecolor="white", linewidth=2,
+           zorder=3, label="Switch closed")
+    opens = is_open.copy()
+    opens[0] = False
+    ax.plot(x[opens], level[opens], "o", ms=8, color=grey, mec="white", mew=2, zorder=4,
+            label="Switch open")
+    ax.plot([0], [0], "o", ms=8, mfc="white", mec=grey, mew=1.5, zorder=4)
+    for i in x[closed]:
+        ax.text(i, level[i] + 0.8, f"{level[i]:.0f}", ha="center", va="bottom", fontsize=9)
+    ax.axhline(0, color=rim, lw=0.8, zorder=2)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=8.5, color=ink2)
+    ax.set_ylabel("Change from the start (dB)", color=ink2)
+    top = float(np.nanmax(level)) if np.any(np.isfinite(level)) else 10.0
+    ax.set_ylim(-8, max(top * 1.15, 10))
+    ax.grid(axis="y", color=grid, lw=0.8, zorder=0)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.legend(frameon=False, loc="upper right", ncol=2, fontsize=9)
+    ax.set_title(f"Stuck check: {folder.name}" + (f" ({temp})" if temp else "")
+                 + "\nTall blue bar = it closed.  Grey dot back near 0 = it opened again.",
+                 loc="left", fontsize=11)
+    fig.tight_layout()
+    if save:
+        path = folder / "stuck_check.png"
+        k = 2
+        while path.exists():
+            path = folder / f"stuck_check_{k}.png"
+            k += 1
+        fig.savefig(path, dpi=150)
+        print(f"saved {path}")
+    plt.show()
+    return ax

@@ -1,0 +1,16 @@
+# Measurement data: the database is the record. On the DAQ it lives in
+# E:\QCoDeS\<project>\Cooldown_<NN>\ (with its Sweeps\ and db_backups\), outside
+# this folder; these only catch the laptop fallback and stray copies.
+*.db
+*.db-wal
+*.db-shm
+db_backups/
+local_databases/
+Sweeps/
+
+# NIST's definitions (copied from their repo, not ours to republish); see README
+ideals_3K/
+ideals_295K/
+
+__pycache__/
+.ipynb_checkpoints/

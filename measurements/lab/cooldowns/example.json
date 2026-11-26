@@ -1,0 +1,28 @@
+{
+  "cooldown": 6,
+  "switch_serial": "SN0077",
+  "database_project": "MyProject",
+  "ports": {
+    "RF1": "resonator A",
+    "RF2": "thru: fridge line RF3",
+    "RF4": "50 ohm load"
+  },
+  "thru_channel": 2,
+  "lines": {
+    "input": "RF6",
+    "return": "RF2",
+    "thru": "RF3",
+    "notes": "free text: amplifiers, attenuators, anything about the wiring"
+  },
+  "sweep": {
+    "start_hz": 510000000,
+    "stop_hz": 610000000,
+    "if_bandwidth_hz": 1000
+  },
+  "repeats": 1,
+  "correct_sparam": "S21",
+  "stuck_check": {
+    "pass_db": null,
+    "thru_pass_db": 20
+  }
+}
