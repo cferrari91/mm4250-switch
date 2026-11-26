@@ -21,6 +21,16 @@ LAB = HERE.parents[1] / "measurements" / "lab"
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+# The lab code runs on the framework's scripts/switch_vna.py: use the framework checkout
+# beside this repo (or $MM4250_FRAMEWORK).
+import os  # noqa: E402
+FRAMEWORK = Path(os.environ.get("MM4250_FRAMEWORK", HERE.parents[2] / "QCoDeS-Measurement-Framework"))
+if not (FRAMEWORK / "scripts" / "switch_vna.py").is_file():
+    raise RuntimeError(f"No scripts/switch_vna.py in {FRAMEWORK}: set MM4250_FRAMEWORK to the "
+                       "QCoDeS-Measurement-Framework checkout")
+if str(FRAMEWORK) not in sys.path:
+    sys.path.insert(0, str(FRAMEWORK))
+
 
 def _load(name, filename):
     if name in sys.modules:
@@ -49,12 +59,12 @@ def _agg():
 
 @pytest.fixture
 def cfg(tmp_path):
-    """CD05.json, but with a 201-point sweep (quicker) and loaded through load_cooldown."""
+    """CD05.json loaded through load_cooldown, with the notebooks' sweep added
+    (db.with_sweep): 201 points (quicker than the notebooks' 2001), -20 dBm."""
     data = json.loads((LAB / "cooldowns" / "CD05.json").read_text())
-    data["sweep"]["points"] = 201
     path = tmp_path / "CD_test.json"
     path.write_text(json.dumps(data, indent=2))
-    return db.load_cooldown(path)
+    return db.with_sweep(db.load_cooldown(path), 201, -20)
 
 
 @pytest.fixture
@@ -83,5 +93,6 @@ def ideals(rig, tmp_path):
 def fresh_lab_copy(dest):
     """measurements/lab copied to `dest` (notebook runs), without generated files."""
     shutil.copytree(LAB, dest, ignore=shutil.ignore_patterns(
-        "__pycache__", "local_databases", "Sweeps", "db_backups", ".ipynb_checkpoints"))
+        "__pycache__", "local_databases", "Sweeps", "db_backups", ".ipynb_checkpoints",
+        "ideals_*"))
     return dest

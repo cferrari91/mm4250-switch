@@ -14,7 +14,7 @@ GOOD = json.loads((LAB / "cooldowns" / "CD05.json").read_text())
 def test_shipped_files_load(name):
     cfg = db.load_cooldown(LAB / "cooldowns" / name)
     assert cfg["_text"] == (LAB / "cooldowns" / name).read_text()
-    assert cfg["sweep"]["power_dbm"] <= 0
+    assert set(cfg["sweep"]) == {"start_hz", "stop_hz", "if_bandwidth_hz"}   # points/power: notebooks
 
 
 def test_cd05_is_the_current_port_map():
@@ -51,10 +51,10 @@ CASES = [
     (lambda d: d.update(thru_channel=7), "thru_channel must be a channel number 1-6"),
     (lambda d: (d["ports"].pop("RF2")), "thru_channel 2: RF2 isn't in ports"),
     (lambda d: d["lines"].pop("thru"), "lines.thru"),
-    (lambda d: d["sweep"].update(power_dbm=10), "above the 0 dBm cap"),
+    (lambda d: d["sweep"].update(power_dbm=-20), "power_dbm now set in the notebook"),
+    (lambda d: d["sweep"].update(points=2001), "points now set in the notebook"),
     (lambda d: d["sweep"].update(stop_hz=1e6), "start_hz < stop_hz"),
-    (lambda d: d["sweep"].update(points=20.5), "sweep.points must be a whole number"),
-    (lambda d: d["sweep"].pop("points"), "sweep: missing points"),
+    (lambda d: d["sweep"].pop("if_bandwidth_hz"), "sweep: missing if_bandwidth_hz"),
     (lambda d: d["sweep"].update(ifbw=1), "sweep: unknown key(s) ifbw"),
     (lambda d: d["sweep"].update(start_hz="510 MHz"), "sweep.start_hz must be a number"),
     (lambda d: d.update(repeats=0), "repeats must be a whole number >= 1"),
@@ -93,3 +93,28 @@ def test_not_json_and_missing_file(tmp_path):
         db.load_cooldown(p)
     with pytest.raises(FileNotFoundError, match="No cooldown file"):
         db.load_cooldown(tmp_path / "nope.json")
+
+
+def test_with_sweep_adds_the_notebook_settings_without_touching_the_file():
+    cfg = db.load_cooldown(LAB / "cooldowns" / "CD05.json")
+    run = db.with_sweep(cfg, 20001, -10)
+    assert run["sweep"] == dict(cfg["sweep"], points=20001, power_dbm=-10.0, mode="forward")
+    assert "points" not in cfg["sweep"] and run["_text"] == cfg["_text"]   # the loaded file is unchanged
+
+
+@pytest.mark.parametrize("points, power, message", [
+    (2001, 5, "above the 0 dBm cap"), (20.5, -20, "POINTS must be a whole number"),
+    (1, -20, "POINTS must be a whole number"), (2001, "-20", "POWER_DBM must be a number"),
+    (True, -20, "POINTS must be a whole number")])
+def test_with_sweep_refuses_bad_settings(points, power, message):
+    cfg = db.load_cooldown(LAB / "cooldowns" / "CD05.json")
+    with pytest.raises(ValueError, match=message):
+        db.with_sweep(cfg, points, power)
+
+
+def test_measuring_needs_the_notebook_settings(rig):
+    from conftest import vna
+    cfg = db.load_cooldown(LAB / "cooldowns" / "CD05.json")
+    with pytest.raises(ValueError, match="db.with_sweep"):
+        vna.take(cfg, rig.vna, rig.switch, rig.fridge, channels=[4])
+    assert rig.switch.moves == []

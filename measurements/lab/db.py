@@ -1,36 +1,27 @@
 """
-Files and databases: the cooldown file, which database to write to,
-saving and reading runs, Touchstone files, backups.
+Files and databases: the cooldown file, which database to use, saving and reading runs,
+Touchstone files, backups.
 
-    cfg  = load_cooldown("cooldowns/CD05.json")     # checked; fails with a plain message
-    DB   = open_database(cfg, "vna")                 # the lab helper's file (or a local fallback)
-    save = Saver(DB, "take", files=False)           # what vna.take() calls after each position
-    takes = list_takes(DB); take = load_take(None, DB)
-    export_touchstone([12, 13], DB)                  # never overwrites
+    cfg  = load_cooldown("cooldowns/CD05.json")   # checked; fails with a plain message
+    DB   = open_database(cfg, "vna")               # the lab helper's file (or a local fallback)
+    save = Saver(DB, "take", files=False)         # what vna.take() calls after each position
+    take = load_take(None, DB)                     # the newest take
+    export_touchstone([12, 13], DB)                # never overwrites
 
-Databases. On the DAQ the lab's scripts/database_helper.py (found in the
-framework folder above this one) files them as
-E:\\QCoDeS\\<project>\\Cooldown_<NN>\\<project>_Cooldown_<NN>_<name>.db.
-take_data uses name "vna", stuck_check name "stuck": one writer per .db
-at a time, so the two notebooks never share a file. Where there is no
-helper (a laptop, the tests) the database goes to local_databases/ beside
-this file, with a loud warning saying so.
+Databases: on the DAQ the lab's scripts/database_helper.py puts them at
+E:\\QCoDeS\\<project>\\Cooldown_<NN>\\<project>_Cooldown_<NN>_<name>.db. take_data uses
+"vna", stuck_check "stuck" (one writer per .db). With no helper (a laptop, the tests)
+they go to local_databases/ here, with a loud warning.
 
-Every run is a QCoDeS dataset (frequency + complex S-parameter arrays,
-paramtype "array") plus metadata columns. Each run carries the whole
-cooldown file as text (cooldown_json), so a database alone says how the
-fridge was wired. Touchstone files and CSVs are only written when asked,
-in Sweeps/ beside the database, and never overwrite anything.
-
-Reading uses sqlite3 + numpy (QCoDeS stores each array as an np.save
-blob; anything else fails loudly). Copied and trimmed from the older
-read_db.py / sweep_db.py (2026-11-08).
+Each run is a QCoDeS dataset (frequency + S-parameter arrays) plus metadata columns,
+including the whole cooldown file (cooldown_json), so a database alone says how the fridge
+was wired. Saving, loading and Touchstone writing are scripts/switch_vna.py's (sv).
+Files only go in Sweeps/ beside the database, and never overwrite anything.
 """
 
 import csv
 import hashlib
 import importlib
-import io
 import json
 import os
 import re
@@ -42,15 +33,15 @@ from pathlib import Path
 
 import numpy as np
 
-import vna as _vna   # MAX_POWER_DBM, SPARAMS
+import vna as _vna
+sv = _vna.sv                               # scripts/switch_vna.py
+save_touchstone = sv.save_touchstone       # one implementation, in sv
 
 HERE = Path(__file__).resolve().parent
 LOCAL_DB_DIR = HERE / "local_databases"
-FILES_DIR = "Sweeps"                      # beside the database; gitignored here
+FILES_DIR = "Sweeps"                       # beside the database
 BACKUP_DIR = "db_backups"
 BACKUPS_KEPT = 10
-TOUCHSTONE_2PORT_ORDER = ("S11", "S21", "S12", "S22")   # NOT the reading order
-_NUMPY_MAGIC = b"\x93NUMPY"
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +51,8 @@ _NUMPY_MAGIC = b"\x93NUMPY"
 _TOP_KEYS = {"cooldown", "switch_serial", "database_project", "ports", "thru_channel",
              "lines", "sweep", "repeats", "correct_sparam", "stuck_check"}
 _OPTIONAL_TOP = {"notes"}
-_SWEEP_KEYS = {"start_hz", "stop_hz", "points", "if_bandwidth_hz", "power_dbm"}
+_SWEEP_KEYS = {"start_hz", "stop_hz", "if_bandwidth_hz"}
+_NOTEBOOK_SWEEP_KEYS = {"points", "power_dbm", "mode"}   # set in the notebooks, not the file
 _LINE_KEYS = {"input", "return", "thru", "notes"}
 _STUCK_KEYS = {"pass_db", "thru_pass_db"}
 
@@ -79,10 +71,9 @@ def _text_ok(x):
 
 def load_cooldown(path):
     """
-    Read and check a cooldown file (see README.md and cooldowns/example.json).
-    Every problem found is listed in one ValueError, so one run of this
-    tells you everything to fix. Returns the dict, plus "_path" and
-    "_text" (the file exactly as written, stored on every run).
+    Read and check a cooldown file (see README.md and cooldowns/example.json). Every problem
+    is listed in one ValueError, so one run tells you everything to fix. Returns the dict,
+    plus "_path" and "_text" (the file exactly as written, stored on every run).
     """
     path = Path(path)
     if not path.is_file():
@@ -151,26 +142,27 @@ def load_cooldown(path):
             if set(sweep) != _SWEEP_KEYS:
                 if _SWEEP_KEYS - set(sweep):
                     bad.append(f"sweep: missing {', '.join(sorted(_SWEEP_KEYS - set(sweep)))}")
-                if set(sweep) - _SWEEP_KEYS:
-                    bad.append(f"sweep: unknown key(s) {', '.join(sorted(set(sweep) - _SWEEP_KEYS))}")
+                in_notebook = sorted(set(sweep) & _NOTEBOOK_SWEEP_KEYS)
+                if in_notebook:
+                    bad.append(f"sweep: {', '.join(in_notebook)} now set in the notebook "
+                               "(POINTS / POWER_DBM / SWEEP_MODE), not the cooldown file: "
+                               "remove them here")
+                unknown = set(sweep) - _SWEEP_KEYS - _NOTEBOOK_SWEEP_KEYS
+                if unknown:
+                    bad.append(f"sweep: unknown key(s) {', '.join(sorted(unknown))}")
             for key in _SWEEP_KEYS & set(sweep):
                 if not _is_num(sweep[key]):
                     bad.append(f"sweep.{key} must be a number, got {sweep[key]!r}")
             if all(_is_num(sweep.get(k)) for k in ("start_hz", "stop_hz")):
                 if not 0 < sweep["start_hz"] < sweep["stop_hz"]:
                     bad.append("sweep: need 0 < start_hz < stop_hz")
-            if "points" in sweep and not (_is_int(sweep["points"]) and sweep["points"] >= 2):
-                bad.append(f"sweep.points must be a whole number >= 2, got {sweep['points']!r}")
             if _is_num(sweep.get("if_bandwidth_hz")) and sweep["if_bandwidth_hz"] <= 0:
                 bad.append("sweep.if_bandwidth_hz must be > 0")
-            if _is_num(sweep.get("power_dbm")) and sweep["power_dbm"] > _vna.MAX_POWER_DBM:
-                bad.append(f"sweep.power_dbm {sweep['power_dbm']:g} is above the "
-                           f"{_vna.MAX_POWER_DBM:g} dBm cap (vna.MAX_POWER_DBM)")
 
     if "repeats" in cfg and not (_is_int(cfg["repeats"]) and cfg["repeats"] >= 1):
         bad.append(f"repeats must be a whole number >= 1, got {cfg['repeats']!r}")
-    if "correct_sparam" in cfg and cfg["correct_sparam"] not in _vna.SPARAMS:
-        bad.append(f"correct_sparam must be one of {', '.join(_vna.SPARAMS)}, "
+    if "correct_sparam" in cfg and cfg["correct_sparam"] not in sv.SPARAMS:
+        bad.append(f"correct_sparam must be one of {', '.join(sv.SPARAMS)}, "
                    f"got {cfg['correct_sparam']!r}")
 
     stuck = cfg.get("stuck_check")
@@ -191,6 +183,35 @@ def load_cooldown(path):
     return cfg
 
 
+def with_sweep(cfg, points, power_dbm, mode=sv.DEFAULT_SWEEP_MODE):
+    """
+    A copy of the cooldown file with the notebook's POINTS, POWER_DBM and SWEEP_MODE added
+    (the file only has the band and IF bandwidth).
+    mode: "forward" (default; S11 + S21, port 2 never sources) or "2port" (all four).
+    Refuses bad points, power above the cap, an unknown mode, and forward with a
+    correct_sparam it doesn't measure (S12/S22).
+    """
+    bad = []
+    if mode not in sv.SWEEP_MODES:
+        bad.append(f"SWEEP_MODE must be one of {', '.join(repr(m) for m in sv.SWEEP_MODES)}, "
+                   f"got {mode!r}")
+    elif cfg.get("correct_sparam", "S21") not in sv.SWEEP_MODES[mode]:
+        bad.append(f"the cooldown file's correct_sparam is {cfg['correct_sparam']}, which "
+                   f"SWEEP_MODE {mode!r} doesn't measure: use SWEEP_MODE = \"2port\"")
+    if not (_is_int(points) and points >= 2):
+        bad.append(f"POINTS must be a whole number >= 2, got {points!r}")
+    if not _is_num(power_dbm):
+        bad.append(f"POWER_DBM must be a number in dBm, got {power_dbm!r}")
+    elif power_dbm > sv.MAX_POWER_DBM:
+        bad.append(f"POWER_DBM {power_dbm:g} is above the {sv.MAX_POWER_DBM:g} dBm cap "
+                   "(MAX_POWER_DBM in scripts/switch_vna.py)")
+    if bad:
+        raise ValueError("; ".join(bad))
+    out = dict(cfg)
+    out["sweep"] = dict(cfg["sweep"], points=int(points), power_dbm=float(power_dbm), mode=mode)
+    return out
+
+
 def print_cooldown(cfg):
     """A short summary of a loaded cooldown file."""
     s = cfg["sweep"]
@@ -203,49 +224,38 @@ def print_cooldown(cfg):
     print(f"  fridge lines: input {lines['input']}, return {lines['return']}"
           + (f", thru {lines['thru']}" if lines.get("thru") else "")
           + (f"  ({lines['notes']})" if lines.get("notes") else ""))
-    print(f"  sweep {s['start_hz'] / 1e6:g}-{s['stop_hz'] / 1e6:g} MHz, {s['points']} points, "
-          f"IF {s['if_bandwidth_hz']:g} Hz, {s['power_dbm']:g} dBm; repeats {cfg['repeats']}; "
-          f"corrected on {cfg['correct_sparam']}")
+    extra = (f", {s['points']} points, {s['power_dbm']:g} dBm" if "points" in s
+             else " (points and power: set in the notebook)")
+    print(f"  sweep {s['start_hz'] / 1e6:g}-{s['stop_hz'] / 1e6:g} MHz, IF {s['if_bandwidth_hz']:g} Hz"
+          f"{extra}; repeats {cfg['repeats']}; corrected on {cfg['correct_sparam']}")
 
 
 # ---------------------------------------------------------------------------
 # Which database
 # ---------------------------------------------------------------------------
 
-def find_database_helper(start=None):
-    """
-    The lab's scripts/database_helper.py, imported as scripts.database_helper
-    from the first folder at or above `start` (default: this file's folder)
-    that has it (on the DAQ, the framework checkout). None if there isn't one.
-    """
-    start = Path(start).resolve() if start is not None else HERE
-    root = next((p for p in (start, *start.parents)
-                 if (p / "scripts" / "database_helper.py").is_file()), None)
-    if root is None:
-        return None
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    return importlib.import_module("scripts.database_helper")
-
-
 def open_database(cfg, name, create=True, helper="find", local_dir=None):
     """
-    The database for this cooldown file and `name` ("vna" for takes,
-    "stuck" for the stuck/thru checks). Returns its Path.
+    This cooldown's database called `name` ("vna" for takes, "stuck" for checks). Returns
+    its Path.
 
-    With the lab helper (found with find_database_helper, or `helper`, a
-    module with setup_database and database_path): its file, made and set
-    as QCoDeS's database by setup_database. Without one: a local file in
-    local_databases/ beside this file (or `local_dir`), with a loud
-    warning. create=False only works out the path (nothing is made), for
-    a notebook that may save files beside the database but nothing in it.
+    helper "find": the lab's scripts/database_helper.py in the first folder above this one
+    that has it (the framework on the DAQ); or pass a module with setup_database and
+    database_path, or None. With a helper: its file, made and set as QCoDeS's database. With
+    none: local_databases/ here (or local_dir), with a loud warning.
+    create=False only works out the path (nothing is made).
     """
     import qcodes
     from qcodes.dataset import initialise_or_create_database_at
 
     project, cooldown = cfg["database_project"], cfg["cooldown"]
     if helper == "find":
-        helper = find_database_helper()
+        root = next((p for p in (HERE, *HERE.parents) if (p / "scripts" / "database_helper.py").is_file()), None)
+        helper = None
+        if root is not None:
+            if str(root) not in sys.path:
+                sys.path.insert(0, str(root))
+            helper = importlib.import_module("scripts.database_helper")
     if helper is not None:
         if not create:
             return Path(helper.database_path(project, cooldown, name)).resolve()
@@ -273,8 +283,14 @@ def open_database(cfg, name, create=True, helper="find", local_dir=None):
     return path
 
 
+def files_folder(root, kind, ident, serial, temp_str):
+    """<root>/Sweeps/<kind>/<id>_<serial>_<temp>/ (root: the database's folder; kind: takes,
+    stuck_check or thru_check)."""
+    return Path(root).resolve() / FILES_DIR / kind / f"{ident}_{serial}_{temp_str}"
+
+
 def take_folder(db_path, take):
-    """Where a take's Touchstone files and saved figures go (files_folder for a take)."""
+    """Where a take's Touchstone files and figures go."""
     return files_folder(Path(db_path).parent, "takes", take["take_id"],
                         take["cfg"]["switch_serial"], take["temp_str"])
 
@@ -290,72 +306,16 @@ def take_run_ids(take):
 # Saving
 # ---------------------------------------------------------------------------
 
-def _clean_value(value):
-    """Metadata values QCoDeS can store: text and numbers; None means skip."""
-    if value is None:
-        return None
-    if isinstance(value, (bool, np.bool_)):
-        return int(value)
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, (dict, list, tuple)):
-        return json.dumps(value)
-    return value
-
-
-def save_run(db_path, experiment, sample, name, freq, data, metadata):
-    """
-    One run (frequency + complex arrays, e.g. {"S11": ..., "S21": ...}) as
-    a QCoDeS dataset named `name` in `experiment`, with `metadata` as
-    columns (None values skipped). Returns the run id. The write-ahead log
-    is folded into the .db afterwards, so the file is complete on its own.
-    """
-    from qcodes.dataset import Measurement, connect, load_or_create_experiment
-
-    conn = connect(str(db_path))
-    try:
-        exp = load_or_create_experiment(experiment, sample_name=sample, conn=conn)
-        meas = Measurement(exp=exp, name=name)
-        meas.register_custom_parameter("frequency", label="Frequency", unit="Hz",
-                                       paramtype="array")
-        for sparam in data:     # "array", never "complex": complex arrays fail on read-back
-            meas.register_custom_parameter(sparam.lower(), label=sparam, unit="",
-                                           setpoints=("frequency",), paramtype="array")
-        with meas.run() as saver:
-            saver.add_result(("frequency", np.asarray(freq)),
-                             *[(s.lower(), np.asarray(v)) for s, v in data.items()])
-            dataset = saver.dataset
-            dataset.add_metadata("n_ports", 2 if len(data) == 4 else 1)
-            for key, value in metadata.items():
-                value = _clean_value(value)
-                if value is not None:
-                    dataset.add_metadata(key, value)
-        run_id = dataset.run_id
-    finally:
-        conn.close()
-    _checkpoint(db_path)
-    return run_id
-
-
-def files_folder(root, kind, ident, serial, temp_str):
-    """<root>/Sweeps/<kind>/<id>_<serial>_<temp>/: root is the database's folder;
-    kind is takes, stuck_check or thru_check."""
-    return Path(root).resolve() / FILES_DIR / kind / f"{ident}_{serial}_{temp_str}"
-
-
 class Saver:
     """
     What vna.take / stuck_check / thru_check call after each position:
     save(name, freq, data, metadata) -> run id (or None).
 
-    db_path: the database (None = don't save to a database).
-    experiment: "take", "stuck_check" or "thru_check" (the QCoDeS
-    experiment; sample = the switch serial).
-    files: also write a Touchstone file per position into
-    files_folder(...), named <step>_<position>[_run<id>].s2p; an existing
-    file is never overwritten (skipped with a warning). `files_root`: the
-    folder Sweeps/ goes in (default: the database's folder; needed when
-    db_path is None). After a sequence, .folder is where the files went.
+    db_path: the database (None: no database). experiment: "take", "stuck_check" or
+    "thru_check" (sample = the switch serial). files=True: also a Touchstone file per
+    position, <step>_<position>[_run<id>].s2p, in files_folder(...) (never overwrites).
+    files_root: where Sweeps/ goes (default: the database's folder). After a sequence,
+    .folder is where the files went.
     """
 
     def __init__(self, db_path, experiment, files=False, files_root=None):
@@ -372,29 +332,27 @@ class Saver:
     def __call__(self, name, freq, data, metadata):
         run_id = None
         if self.db_path is not None:
-            run_id = save_run(self.db_path, self.experiment, metadata.get("switch_serial"),
-                              name, freq, data, metadata)
+            run_id = sv.store(self.db_path, name, freq, data, metadata, experiment=self.experiment,
+                              sample=metadata.get("switch_serial"))
         if self.files:
             ident = metadata.get("take_id") or metadata.get("check_id")
             kind = {"take": "takes"}.get(self.experiment, self.experiment)
             self.folder = files_folder(self.files_root, kind, ident, metadata.get("switch_serial"),
                                        metadata.get("temp_str"))
             stem = f"{metadata.get('step', 0):02d}_{name}" + (f"_run{run_id}" if run_id else "")
-            path = self.folder / (stem + (".s2p" if len(data) == 4 else ".s1p"))
-            if save_touchstone(freq, data, path):
+            path = self.folder / (stem + (".s1p" if len(data) == 1 else ".s2p"))
+            if sv.save_touchstone(freq, data, path):
                 self.paths.append(path)
         return run_id
 
 
 def save_corrected(db_path, result, take, files=False):
     """
-    Save ecal.correct_take's result as runs of their own: one per channel
-    per repeat, named RF<n>_corrected, a 1-port reflection at RF n's
-    connector (stored as S11), kind "corrected", linked to the raw runs it
-    came from (source_run_ids: the channel run, then that repeat's
-    standards), plus which definitions and which raw trace were used.
-    Refuses (saves nothing) if this take already has corrected runs with
-    the same definitions. Returns the new run ids.
+    Save ecal.correct_take's result as runs of their own: one per channel per repeat, named
+    RF<n>_corrected (the reflection at RF n's connector, stored as S11), kind "corrected",
+    linked to its raw runs (source_run_ids: the channel run, then that repeat's standards).
+    Refuses (saves nothing) if the take already has corrected runs with the same
+    definitions. Returns the new run ids.
     """
     existing = [c for c in take["corrected"] if c["definitions"] == result["definitions"]]
     if existing:
@@ -411,26 +369,27 @@ def save_corrected(db_path, result, take, files=False):
                     "cooldown": cfg["cooldown"], "switch_serial": cfg["switch_serial"],
                     "start_temp_k": take["temp_k"], "temp_str": take["temp_str"],
                     "mxc_temp_k": raw_meta.get("mxc_temp_k"), "note": raw_meta.get("note"),
+                    "vna_sweep_mode": raw_meta.get("vna_sweep_mode"),
+                    **{k: raw_meta.get(k) for k in _TEMP_KEYS},     # the raw channel run's
                     "cooldown_json": cfg["_text"], "definitions": result["definitions"],
                     "definitions_chosen": result.get("chosen"),
                     "definitions_dir": Path(result["definitions_dir"]).name,
                     "corrected_from": result["sparam"], "fmin_hz": result["fmin_hz"],
                     "source_run_ids": json.dumps(src[ch])}
-            run_id = save_run(db_path, "take", cfg["switch_serial"], f"RF{ch}_corrected",
-                              result["freq"], {"S11": gamma}, meta)
+            run_id = sv.store(db_path, f"RF{ch}_corrected", result["freq"], {"S11": gamma}, meta,
+                              experiment="take", sample=cfg["switch_serial"])
             ids.append(run_id)
             if files:
                 folder = files_folder(Path(db_path).parent, "takes", take["take_id"],
                                       cfg["switch_serial"], take["temp_str"])
-                save_touchstone(result["freq"], gamma,
-                                folder / f"RF{ch}_corrected_rep{k}_run{run_id}.s1p")
+                sv.save_touchstone(result["freq"], gamma, folder / f"RF{ch}_corrected_rep{k}_run{run_id}.s1p")
     print(f"Saved {len(ids)} corrected run(s) ({result['definitions']}, from "
           f"{result['sparam']}): {ids}")
     return ids
 
 
 def write_check_csv(result, folder, pass_db=None):
-    """positions.csv for a stuck/thru check: one row per position."""
+    """positions.csv for a stuck/thru check: one row per position. Never overwrites."""
     folder = Path(folder)
     path = folder / "positions.csv"
     if path.exists():
@@ -439,64 +398,22 @@ def write_check_csv(result, folder, pass_db=None):
     folder.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["step", "position", "run_id", "mxc_temp_K",
+        w.writerow(["step", "position", "run_id", "mxc_temp_K", *_TEMP_KEYS,
                     "median_abs_S21_minus_first_open", "contrast_db", "level_db", "flag"])
         for r in result["rows"]:
-            w.writerow([r["step"], r["label"], r["run_id"], r["temp_k"], r["diff"],
+            temps = r.get("temps") or {}
+            w.writerow([r["step"], r["label"], r["run_id"], r["temp_k"],
+                        *[temps.get(k) for k in _TEMP_KEYS], r["diff"],
                         r.get("contrast_db"), r.get("level_db"), r.get("flag", "")])
     print(f"  wrote {path}")
     return path
 
 
-# ---------------------------------------------------------------------------
-# Touchstone
-# ---------------------------------------------------------------------------
-
-def save_touchstone(freq, data, path):
-    """
-    Write a .s1p (a bare array or {"S11": ...}) or .s2p (all four, in
-    Touchstone's S11 S21 S12 S22 order). Never overwrites: an existing
-    file is left alone with a warning and False returned.
-    """
-    data = dict(data) if hasattr(data, "keys") else {"S11": data}
-    path = Path(path)
-    if path.exists():
-        print(f"  [warning] {path} exists; not overwritten")
-        return False
-    if len(data) == 1:
-        columns = [next(iter(data.values()))]
-    elif len(data) == 4:
-        columns = [data[s] for s in TOUCHSTONE_2PORT_ORDER]
-    else:
-        raise ValueError(f"Touchstone needs 1 or 4 S-parameters, got {sorted(data)}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "x") as f:                    # "x": fails rather than overwrite
-        f.write("! MM4250 lab code (measurements/lab/db.py)\n# HZ S RI R 50\n")
-        for i in range(len(freq)):
-            f.write(f"{freq[i]:.1f} " + " ".join(f"{c[i].real:.10e} {c[i].imag:.10e}"
-                                                for c in columns) + "\n")
-    return True
-
-
-def read_touchstone(path):
-    """A .s1p/.s2p written by save_touchstone (RI, Hz) -> (freq, {"S11": ...})."""
-    rows = []
-    for line in Path(path).read_text().splitlines():
-        line = line.split("!")[0].strip()
-        if line and not line.startswith("#"):
-            rows.append([float(x) for x in line.split()])
-    a = np.array(rows)
-    z = a[:, 1::2] + 1j * a[:, 2::2]
-    names = ("S11",) if z.shape[1] == 1 else TOUCHSTONE_2PORT_ORDER
-    return a[:, 0], {n: z[:, i] for i, n in enumerate(names)}
-
-
 def export_touchstone(run_ids, db_path, out_dir=None):
     """
-    Write runs from the database as Touchstone files, <name>_run<id>.s2p
-    (.s1p for corrected runs), into `out_dir` (default
-    <database folder>/Sweeps/export/). Never overwrites. Returns the paths
-    of the files that exist afterwards.
+    Runs from the database as Touchstone files, <name>_run<id>.s2p (.s1p for corrected
+    runs), in out_dir (default <database folder>/Sweeps/export/). Never overwrites.
+    Returns the paths.
     """
     if isinstance(run_ids, int):
         run_ids = [run_ids]
@@ -506,20 +423,29 @@ def export_touchstone(run_ids, db_path, out_dir=None):
     for run_id in run_ids:
         if run_id not in names:
             raise KeyError(f"No run {run_id} in {Path(db_path).name}")
-        freq, data = load_run(run_id, db_path)
-        path = out_dir / f"{names[run_id]}_run{run_id}{'.s2p' if len(data) == 4 else '.s1p'}"
-        if save_touchstone(freq, data, path):
+        freq, data, _ = sv.load(db_path, run_id)
+        path = out_dir / f"{names[run_id]}_run{run_id}{'.s1p' if len(data) == 1 else '.s2p'}"
+        if sv.save_touchstone(freq, data, path):
             print(f"  wrote {path}")
         paths.append(path)
     return paths
 
 
 # ---------------------------------------------------------------------------
-# Reading (sqlite3 + numpy)
+# Reading
 # ---------------------------------------------------------------------------
 
+# The metadata columns read back with each run (NULL where a run doesn't have one).
+_META = ("take_id", "check_id", "check_type", "kind", "standards_when", "repeat", "step",
+         "position", "channel", "port", "mxc_temp_k",
+         "mxp_k_before", "mxp_k_after", "mxp2_k_before", "mxp2_k_after", "stp_k_before", "stp_k_after",
+         "start_temp_k", "temp_str", "note", "vna_sweep_mode",
+         "definitions", "definitions_chosen", "corrected_from", "source_run_ids", "cooldown_json", "switch_serial")
+_TEMP_KEYS = tuple(k for k in _META if k.endswith(("_k_before", "_k_after")))   # fridge, before/after
+
+
 def _connect(db_path):
-    """Open for reading. mode=rw (not ro: ro leaves -wal/-shm it can't clean up); never creates."""
+    """Open for reading. mode=rw (ro leaves -wal/-shm files it can't clean up); never creates."""
     db_path = Path(db_path)
     if not db_path.is_file():
         raise FileNotFoundError(f"No database at {db_path}")
@@ -530,47 +456,8 @@ def _columns(con):
     return {row[1] for row in con.execute('PRAGMA table_info("runs")')}
 
 
-def _array(blob, where):
-    if not isinstance(blob, bytes) or not blob.startswith(_NUMPY_MAGIC):
-        raise RuntimeError(f"{where}: not a numpy array blob; QCoDeS's storage format may have "
-                           "changed. Load it with qcodes.dataset.load_by_id instead.")
-    return np.load(io.BytesIO(blob), allow_pickle=False)
-
-
-def load_run(run_id, db_path):
-    """One run's data: (freq_hz, {"S11": complex array, ...})."""
-    con = _connect(db_path)
-    try:
-        row = con.execute("SELECT result_table_name, parameters FROM runs WHERE run_id = ?",
-                          (run_id,)).fetchone()
-        if row is None:
-            raise KeyError(f"No run {run_id} in {Path(db_path).name}")
-        table, params = row
-        cols = params.split(",")
-        rows = con.execute(f'SELECT {", ".join(cols)} FROM "{table}"').fetchall()
-    finally:
-        con.close()
-    freq, data = None, {}
-    for values in rows:
-        for col, blob in zip(cols[1:], values[1:]):
-            if blob is None:
-                continue
-            f = _array(values[0], f"run {run_id} frequency")
-            if freq is None:
-                freq = f
-            data[col.upper()] = _array(blob, f"run {run_id} {col}")
-    if freq is None or len(data) != len(cols) - 1:
-        raise RuntimeError(f"run {run_id}: incomplete data")
-    return freq, data
-
-
-_META = ("take_id", "check_id", "check_type", "kind", "standards_when", "repeat", "step",
-         "position", "channel", "port", "mxc_temp_k", "start_temp_k", "temp_str", "note",
-         "definitions", "definitions_chosen", "corrected_from", "source_run_ids", "cooldown_json", "switch_serial")
-
-
 def _run_rows(db_path, where, params):
-    """Runs (with the metadata columns above) matching a WHERE clause, oldest first."""
+    """Runs (with the _META columns) matching a WHERE clause, or a list of run ids; oldest first."""
     con = _connect(db_path)
     try:
         have = _columns(con)
@@ -578,7 +465,7 @@ def _run_rows(db_path, where, params):
         sql = f"SELECT run_id, name, run_timestamp, {cols} FROM runs"
         if where:
             sql += " WHERE " + where
-        elif params:                                       # a list of run ids
+        elif params:                              # a list of run ids
             sql += f" WHERE run_id IN ({', '.join('?' * len(params))})"
         rows = con.execute(sql + " ORDER BY run_id", params).fetchall()
     finally:
@@ -587,11 +474,10 @@ def _run_rows(db_path, where, params):
 
 
 def list_takes(db_path, verbose=True):
-    """Every take in the database, oldest first: id, when, channels, temperature, what was saved."""
+    """Every take in the database, oldest first: id, when, channels, temperature, what's saved."""
     if not Path(db_path).is_file():
         print(f"No database at {db_path}")
         return []
-    have = set()
     con = _connect(db_path)
     try:
         have = _columns(con)
@@ -628,8 +514,7 @@ def load_take(take_id, db_path):
     """
     A take back from the database (take_id None = the newest):
 
-        {"take_id", "cfg" (its cooldown file, with "_text"), "temp_k" (reading at
-         the start), "temp_str", "channels", "freq",
+        {"take_id", "cfg" (its cooldown file), "temp_k", "temp_str", "channels", "freq",
          "repeats": [{"before": {state: run}, "ports": {ch: run}, "after": {state: run}}],
          "corrected": [run, ...]}
 
@@ -647,7 +532,7 @@ def load_take(take_id, db_path):
     cfg["_text"] = rows[0]["cooldown_json"]
     repeats, corrected, freq, channels = {}, [], None, []
     for r in rows:
-        f, data = load_run(r["run_id"], db_path)
+        f, data, _ = sv.load(db_path, r["run_id"])
         run = {"run_id": r["run_id"], "data": data, "meta": r}
         if r["kind"] == "corrected":
             corrected.append(dict(run, channel=r["channel"], repeat=r["repeat"],
@@ -671,10 +556,10 @@ def load_take(take_id, db_path):
 
 
 def load_runs(run_ids, db_path):
-    """{run_id: {"name", "freq", "data", "meta"}} for a list of run ids (Recall)."""
+    """{run_id: {"name", "freq", "data", "meta"}} for a list of run ids."""
     out = {}
     for r in _run_rows(db_path, "", list(run_ids)):
-        f, data = load_run(r["run_id"], db_path)
+        f, data, _ = sv.load(db_path, r["run_id"])
         out[r["run_id"]] = {"name": r["name"], "freq": f, "data": data, "meta": r}
     missing = sorted(set(run_ids) - set(out))
     if missing:
@@ -683,25 +568,11 @@ def load_runs(run_ids, db_path):
 
 
 # ---------------------------------------------------------------------------
-# Write-ahead log and backups
+# Backups
 # ---------------------------------------------------------------------------
 
-def _checkpoint(db_path):
-    """
-    Fold the -wal into the .db (PASSIVE: never blocks a reader), so the
-    .db is complete on its own while a kernel still holds it open.
-    """
-    conn = sqlite3.connect(str(db_path))
-    try:
-        _, log_pages, done = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
-    finally:
-        conn.close()
-    if log_pages > 0 and done < log_pages:
-        print(f"  [note] {Path(db_path).name}: {log_pages - done} page(s) still in the -wal "
-              "(another reader has it open); copy the -wal too")
-
-
 def _fingerprint(con):
+    """A hash of every experiment and run row: equal means nothing new."""
     h = hashlib.sha256()
     for table in ("experiments", "runs"):
         for row in con.execute(f"SELECT * FROM {table} ORDER BY 1"):
@@ -716,66 +587,61 @@ def _existing_backups(backup_dir, stem):
 
 def backup_db(db_path, keep=BACKUPS_KEPT):
     """
-    A checked snapshot of the database in db_backups/ beside it
-    (<stem>_YYYYMMDD-HHMMSS.db), through SQLite's backup API (consistent
-    while a kernel has it open). Skipped if nothing changed since the
-    last backup; the newest `keep` are kept. Never raises: a backup
-    problem is printed, so it can't hide the measurement's own result.
+    A checked copy of the database in db_backups/ beside it (<stem>_YYYYMMDD-HHMMSS.db), made
+    with SQLite's backup API (safe while a kernel has it open). Skipped if nothing changed
+    since the last backup; the newest `keep` are kept. Never raises (a problem is printed).
     Returns the new path or None.
     """
     try:
-        return _backup(Path(db_path), keep)
-    except Exception as e:
-        print(f"  [warning] database backup failed ({type(e).__name__}: {e}); "
-              "the database itself is fine -- run db.backup_db(DB) by hand")
-        return None
-
-
-def _backup(db_path, keep):
-    if not db_path.is_file():
-        raise FileNotFoundError(f"no database at {db_path}")
-    backup_dir = db_path.parent / BACKUP_DIR
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    stem = db_path.stem
-    existing = _existing_backups(backup_dir, stem)
-    src = sqlite3.connect(str(db_path), timeout=30)
-    try:
-        fingerprint = _fingerprint(src)
-        if existing:
-            last = sqlite3.connect(f"file:{existing[-1].as_posix()}?mode=ro", uri=True)
-            try:
-                same = _fingerprint(last) == fingerprint
-            except sqlite3.Error:
-                same = False
-            finally:
-                last.close()
-            if same:
-                print(f"  backup: no new runs since {existing[-1].name}, nothing written")
-                return None
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        final = backup_dir / f"{stem}_{stamp}.db"
-        while final.exists():                    # two in one second: never overwrite
-            time.sleep(1.05)
+        db_path = Path(db_path)
+        if not db_path.is_file():
+            raise FileNotFoundError(f"no database at {db_path}")
+        backup_dir = db_path.parent / BACKUP_DIR
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stem = db_path.stem
+        existing = _existing_backups(backup_dir, stem)
+        src = sqlite3.connect(str(db_path), timeout=30)
+        try:
+            fingerprint = _fingerprint(src)
+            if existing:
+                last = sqlite3.connect(f"file:{existing[-1].as_posix()}?mode=ro", uri=True)
+                try:
+                    same = _fingerprint(last) == fingerprint
+                except sqlite3.Error:
+                    same = False
+                finally:
+                    last.close()
+                if same:
+                    print(f"  backup: no new runs since {existing[-1].name}, nothing written")
+                    return None
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             final = backup_dir / f"{stem}_{stamp}.db"
-        partial = backup_dir / f"{stem}_{stamp}.db.partial"
-        dst = sqlite3.connect(str(partial))
-        try:
-            src.backup(dst)
-            dst.execute("PRAGMA journal_mode=DELETE")
-            check = dst.execute("PRAGMA quick_check").fetchone()[0]
-            n_src = src.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
-            n_dst = dst.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            while final.exists():                 # two in one second: never overwrite
+                time.sleep(1.05)
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                final = backup_dir / f"{stem}_{stamp}.db"
+            partial = backup_dir / f"{stem}_{stamp}.db.partial"
+            dst = sqlite3.connect(str(partial))
+            try:
+                src.backup(dst)
+                dst.execute("PRAGMA journal_mode=DELETE")
+                check = dst.execute("PRAGMA quick_check").fetchone()[0]
+                n_src = src.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+                n_dst = dst.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            finally:
+                dst.close()
         finally:
-            dst.close()
-    finally:
-        src.close()
-    if check != "ok" or n_src != n_dst:
-        partial.unlink()
-        raise RuntimeError(f"backup failed its check (quick_check={check!r}, runs {n_dst} vs {n_src})")
-    os.replace(partial, final)
-    removed = _existing_backups(backup_dir, stem)[:-keep] if keep else []
-    for old in removed:
-        old.unlink()
-    print(f"  backup: {n_dst} runs -> {final}" + (f", removed {len(removed)} older" if removed else ""))
-    return final
+            src.close()
+        if check != "ok" or n_src != n_dst:
+            partial.unlink()
+            raise RuntimeError(f"backup failed its check (quick_check={check!r}, runs {n_dst} vs {n_src})")
+        os.replace(partial, final)
+        removed = _existing_backups(backup_dir, stem)[:-keep] if keep else []
+        for old in removed:
+            old.unlink()
+        print(f"  backup: {n_dst} runs -> {final}" + (f", removed {len(removed)} older" if removed else ""))
+        return final
+    except Exception as e:
+        print(f"  [warning] database backup failed ({type(e).__name__}: {e}); "
+              "the database itself is fine: run db.backup_db(DB) by hand")
+        return None

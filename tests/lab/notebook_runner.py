@@ -8,6 +8,7 @@ How (also what tests/lab/test_lab_notebooks.py does):
 
   1. A temporary folder laid out like the DAQ:
        framework/drivers/                          (empty: the Setup cell looks for it)
+       framework/scripts/switch_vna.py             the framework's (from the checkout beside this repo)
        framework/scripts/database_helper.py        the framework's real helper, its
                                                    E:/QCoDeS root pointed at <tmp>/QCoDeS
                                                    (a stand-in with the same layout if the
@@ -87,16 +88,22 @@ def make_daq_layout(tmp):
     else:
         (fw / "scripts" / "database_helper.py").write_text(STAND_IN_HELPER.format(root=qroot))
         which = "stand-in helper (framework checkout not found)"
+    from conftest import FRAMEWORK
+    shutil.copy(FRAMEWORK / "scripts" / "switch_vna.py", fw / "scripts" / "switch_vna.py")
     lab = fw / "Users" / "Charlie_Ferrari" / "lab"
     shutil.copytree(LAB, lab, ignore=shutil.ignore_patterns(
-        "__pycache__", "local_databases", "Sweeps", "db_backups", ".ipynb_checkpoints"))
+        "__pycache__", "local_databases", "Sweeps", "db_backups", ".ipynb_checkpoints",
+        "ideals_*"))
     return lab, qroot, which
+
+
+NOTEBOOK_POINTS = 2001     # POINTS in both notebooks: the fake chain must match it
 
 
 def preamble(lab, fridge="295", noise=0.0):
     """Kernel code run before the first cell. fridge: kelvin as text, or "novpn"."""
     cfg = json.loads((lab / "cooldowns" / "CD05.json").read_text())
-    s = cfg["sweep"]
+    s = dict(cfg["sweep"], points=NOTEBOOK_POINTS)   # the notebooks' POINTS (not in the file)
     return textwrap.dedent(f'''
         import sys, types
         sys.path.insert(0, r"{HERE}")

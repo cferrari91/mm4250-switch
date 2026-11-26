@@ -16,9 +16,19 @@ Extras for the checks:
   * vna.noise: complex Gaussian noise added to every read;
   * vna.port1_line: which fridge line VNA port 1 is on; on the thru line
     S21 is a transmission (THRU_CLOSED with the thru channel closed,
-    THRU_OPEN otherwise).
+    THRU_OPEN otherwise);
+  * vna.directions: per sweep, ("forward",) or ("forward", "reverse"), the
+    way the real VNA picks them: with port 2's source state AUTO it sources
+    only when a trace needs S12 or S22 ("reverse"); OFF never ("reverse,
+    port 2 off" if a trace wanted it); ON always. vna.reverse_sweeps counts
+    the sweeps in which port 2 sourced. vna.port2_mode is the state
+    (SOUR1:POW2:MODE <state> / ?); vna.port2_supported = False makes the
+    VNA ignore the command and refuse the query. CALC:PAR:DEL "<name>"
+    deletes a trace.
 """
 
+import importlib.util
+import os
 import sys
 import types
 from pathlib import Path
@@ -85,9 +95,14 @@ class FakeVNA:
         self.active_trace = _Param(1)
         self.correction = 0
         self._traces = []
+        self._next_trace = 1
         self._data = None
         self.writes = []
         self.sweeps = 0
+        self.reverse_sweeps = 0
+        self.directions = []
+        self.port2_mode = "AUTO"              # the VNA's default
+        self.port2_supported = True
         self.closed = False
         self.visa_handle = types.SimpleNamespace(query_binary_values=self._sdata)
 
@@ -96,17 +111,25 @@ class FakeVNA:
         return list(self._traces)
 
     def add_trace(self):
-        self._traces.append(FakeTrace(self, len(self._traces) + 1))
+        self._traces.append(FakeTrace(self, self._next_trace))
+        self._next_trace += 1
         raise RuntimeError("driver's zip() bug: the trace was made anyway")   # as the real one can
 
     def write(self, cmd):
         self.writes.append(cmd)
         if cmd == "SENS:CORR:CSET:DEAC":
             self.correction = 0
+        if cmd.startswith("SOUR1:POW2:MODE ") and self.port2_supported:
+            self.port2_mode = cmd.split(" ", 1)[1].strip().upper()
+        if cmd.startswith("CALC:PAR:DEL "):
+            name = cmd.split(" ", 1)[1].strip('"')
+            self._traces = [tr for tr in self._traces if tr.trace_name != name]
 
     def ask(self, query):
         if query == "SENS:CORR:STAT?":
             return str(self.correction)
+        if query == "SOUR1:POW2:MODE?" and self.port2_supported:
+            return self.port2_mode
         raise RuntimeError(f"fake VNA doesn't answer {query}")
 
     def frequency_axis(self):
@@ -116,6 +139,15 @@ class FakeVNA:
         """One triggered sweep: read the chain at the switch's actual position."""
         if not self.output():
             raise RuntimeError("fake VNA: sweep with the source off")
+        wants_reverse = any(tr.trace() in ("S12", "S22") for tr in self._traces)
+        sourced = self.port2_mode == "ON" or (wants_reverse and self.port2_mode == "AUTO")
+        if sourced:
+            self.directions.append(("forward", "reverse"))
+        elif wants_reverse:
+            self.directions.append(("forward", "reverse, port 2 off"))
+        else:
+            self.directions.append(("forward",))
+        self.reverse_sweeps += sourced
         pos = self.switch.actual()
         if self.thru is not None and self.port1_line == self.thru[0]:
             n = self.points()
@@ -132,7 +164,7 @@ class FakeVNA:
         self.sweeps += 1
 
     def _sdata(self, query, datatype="f", is_big_endian=True):
-        tr = self._traces[self.active_trace() - 1]
+        tr = next(t for t in self._traces if t.trace_num == self.active_trace())
         z = np.asarray(self._data[tr.trace()], complex)
         return np.column_stack([z.real, z.imag]).ravel().tolist()
 
@@ -219,3 +251,139 @@ def make_rig(start=510e6, stop=610e6, points=201, kelvin=295.0, thru=("RF3", 2),
     vna = FakeVNA(chain, switch, thru=thru, noise=noise)
     switch.vna = vna
     return types.SimpleNamespace(chain=chain, vna=vna, switch=switch, fridge=FakeFridge(kelvin))
+
+
+# ---------------------------------------------------------------------------
+# A switch with gates, for the gate test (vna.hv_test)
+# ---------------------------------------------------------------------------
+#
+# The switch tables (STATE_HV_PINS / STATE_WIRE_BYTES) are the lab driver's own, loaded from
+# the framework's drivers/MM4250_QCodes_driver.py with a stub `hid`, so the byte layout is
+# checked against Menlo's real states. GateSwitch decodes whatever bytes it's sent into
+# energized HV lines; GateChain reflects at the first open gate of a made-up tree:
+#
+#     RFC -- internal standards -- [HV2 & HV8] -- [HV10] -- [HV16] -- RF4 connector -- open
+#
+# (the real topology isn't known; this one is in series so every gate shows up).
+
+def _framework():
+    return Path(os.environ.get("MM4250_FRAMEWORK", TESTS.parents[1] / "QCoDeS-Measurement-Framework"))
+
+
+def _load_driver():
+    name = "mm4250_driver_for_hv_tests"
+    if name in sys.modules:
+        return sys.modules[name]
+    sys.modules.setdefault("hid", types.ModuleType("hid"))     # only the HID calls need it
+    spec = importlib.util.spec_from_file_location(name, _framework() / "drivers" / "MM4250_QCodes_driver.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+DRV = _load_driver()
+PINS = {k.value: tuple(int(x[2:]) for x in v) for k, v in DRV.STATE_HV_PINS.items()}
+WIRE = {k.value: tuple(v) for k, v in DRV.STATE_WIRE_BYTES.items()}
+
+# Where each stage of the fake RF4 path reflects when it's the first open one (round trip, ns,
+# from the internal standards). The connector is ~0.5 ns round trip out (warm SN0077).
+TAU = {"internal": 0.0, "HV10": 0.12, "HV16": 0.26, "beyond": 0.60}
+
+
+def _bytes_to_lines(wire):
+    hi, mid, lo = wire[:3]
+    lines = {n + 1 for n in range(8) if lo >> n & 1}
+    lines |= {n + 9 for n in range(8) if mid >> n & 1}
+    lines |= {n + 17 for n in range(6) if hi >> n & 1}
+    return frozenset(lines)
+
+
+class _Device:
+    def __init__(self, sw):
+        self.sw, self.writes, self.buffer = sw, [], None
+
+    def write(self, msg):
+        self.writes.append(list(msg))
+        if msg[1] == 0x00:
+            self.buffer = tuple(msg[2:8])
+        elif msg[1] == 0x02:
+            self.sw._raw(self.buffer)
+
+
+class GateSwitch(FakeSwitch):
+    """FakeSwitch + a driver-board `_device`. Normal moves energize the state's lines too.
+    dead: lines whose gate never closes; frozen: lines whose gate is always closed."""
+
+    def __init__(self):
+        super().__init__()
+        self._device = _Device(self)
+        self.dead, self.frozen = set(), set()
+        self.lines = frozenset()
+        self.raw_moves = []                      # (bytes, source on?) for every raw write
+
+    def _move(self, pos):
+        super()._move(pos)
+        state = pos if isinstance(pos, str) else f"RFC_RF{pos}"
+        self.lines = frozenset(PINS[state])
+
+    def _raw(self, wire):
+        hot = bool(self.vna.output()) if self.vna is not None else None
+        self.raw_moves.append((wire, hot))
+        self.lines = _bytes_to_lines(wire)
+        self._actual = ("lines", self.lines)
+
+    def gate_closed(self, n):
+        return (n in self.lines and n not in self.dead) or n in self.frozen
+
+
+GateSwitch.__module__ = DRV.__name__              # so vna._driver_tables finds the tables
+
+
+class GateChain:
+    """Raw S21 = e00 + e01e10 G / (1 - e11 G), G from the first open gate (RF4 path) or the
+    internal standards; other channels: a 50 ohm load past their connector."""
+
+    def __init__(self, sw, freq, seed=3):
+        self.sw, self.freq = sw, freq
+        rng = np.random.default_rng(seed)
+        w = 2 * np.pi * freq
+        self.e00 = 0.15 * np.exp(-1j * w * 3e-9) + 0.01 * rng.normal()
+        self.e11 = 0.1 * np.exp(-1j * w * 1e-9)
+        self.e01e10 = 0.8 * np.exp(-1j * w * 90e-9)
+
+    def _gamma(self):
+        sw, w = self.sw, 2 * np.pi * self.freq
+        at = lambda tau_ns: np.exp(-1j * w * tau_ns * 1e-9)          # an open tau_ns round trip out
+        if sw.gate_closed(12):
+            return -np.ones_like(w, complex)                           # internal short
+        if sw.gate_closed(1):
+            return np.zeros_like(w, complex)                           # internal load
+        if sw.gate_closed(2) and sw.gate_closed(8):                              # RF3/4/5 trunk
+            if sw.gate_closed(9) and sw.gate_closed(17):
+                return 0.03 * at(TAU["beyond"])                       # RF3: a load
+            if sw.gate_closed(11) and sw.gate_closed(18):
+                return 0.03 * at(TAU["beyond"])                       # RF5: a load
+            if not sw.gate_closed(10):
+                return at(TAU["HV10"])
+            if not sw.gate_closed(16):
+                return at(TAU["HV16"])
+            return at(TAU["beyond"])                                   # RF4 all the way out
+        if sw.gate_closed(3) and sw.gate_closed(19):
+            return 0.03 * at(TAU["beyond"])                           # RF1/2/6 side: loads
+        return at(TAU["internal"])                                     # ALL_OPEN
+
+    def measure_2port(self, channel=None, state=None):
+        g = self._gamma()
+        s21 = self.e00 + self.e01e10 * g / (1 - self.e11 * g)
+        n = self.freq.size
+        return self.freq, {"S11": np.full(n, 0.1 + 0j), "S21": s21, "S12": s21, "S22": np.full(n, 0.1 + 0j)}
+
+
+def make_gate_rig(start=510e6, stop=610e6, points=201, kelvin=0.058, thru=None, noise=1e-5):
+    """Like make_rig, with GateSwitch + GateChain (thru: (fridge line, channel) or None)."""
+    sw = GateSwitch()
+    chain = GateChain(sw, np.linspace(start, stop, points))
+    v = FakeVNA(chain, sw, thru=thru, noise=noise)
+    sw.vna = v
+    return types.SimpleNamespace(vna=v, switch=sw, fridge=FakeFridge(kelvin), chain=chain)

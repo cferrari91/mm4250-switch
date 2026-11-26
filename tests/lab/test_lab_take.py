@@ -37,8 +37,10 @@ def test_full_take_order_metadata_and_switch_left_open(cfg, rig, dbpath):
     take = db.load_take(None, dbpath)                       # None = newest
     assert take["take_id"] == t["take_id"]
     run = take["repeats"][0]["ports"][4]
-    assert sorted(run["data"]) == ["S11", "S12", "S21", "S22"]
+    assert sorted(run["data"]) == ["S11", "S21"]             # forward-only by default
+    assert rig.vna.reverse_sweeps == 0
     m = run["meta"]
+    assert m["vna_sweep_mode"] == "forward"
     assert (m["kind"], m["position"], m["port"], m["repeat"]) == ("raw", "RF4", "resonator", 1)
     assert m["mxc_temp_k"] == 295.0 and m["temp_str"] == "295K" and m["note"] == "first take"
     assert m["switch_serial"] == "SN0077"
@@ -102,7 +104,9 @@ def test_switch_opens_even_when_the_vna_link_dies(cfg, rig, dbpath):
 
 
 def test_refuses_with_vna_correction_on_and_nothing_moves(cfg, rig, dbpath, monkeypatch):
-    monkeypatch.setattr(rig.vna, "write", lambda cmd: None)    # DEAC ignored: cal stays on
+    real_write = rig.vna.write                                  # DEAC ignored: cal stays on
+    monkeypatch.setattr(rig.vna, "write",
+                        lambda cmd: None if cmd == "SENS:CORR:CSET:DEAC" else real_write(cmd))
     rig.vna.correction = 1
     with pytest.raises(RuntimeError, match="correction is ON"):
         _take(cfg, rig, dbpath)
@@ -111,7 +115,7 @@ def test_refuses_with_vna_correction_on_and_nothing_moves(cfg, rig, dbpath, monk
 
 def test_power_cap(cfg, rig, dbpath):
     cfg["sweep"]["power_dbm"] = 5
-    with pytest.raises(ValueError, match="Refusing 5 dBm"):
+    with pytest.raises(ValueError, match="above the 0 dBm cap"):
         _take(cfg, rig, dbpath)
     assert rig.switch.moves == []
 

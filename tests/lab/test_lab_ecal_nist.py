@@ -21,15 +21,15 @@ needs_nist = pytest.mark.skipif(not (NIST_NB / "correcteddata").is_dir(),
 def _take_from_nist_files():
     """NIST's raw files in the shape db.load_take returns (S11 only, one repeat, no after set)."""
     raw = NIST_NB / "rawdata"
-    run = lambda path: {"run_id": None, "data": {"S11": ecal.read_s1p(path)[1]}, "meta": {}}
-    freq = ecal.read_s1p(raw / "port1.s1p")[0]
+    run = lambda path: {"run_id": None, "data": {"S11": ecal.read_touchstone(path)[1]["S11"]}, "meta": {}}
+    freq = ecal.read_touchstone(raw / "port1.s1p")[0]
     std_files = {"ALL_OPEN": "ecal_open", "INTERNAL_SHORT": "ecal_short", "INTERNAL_LOAD": "ecal_load"}
     block = {"before": {s: run(raw / f"{f}.s1p") for s, f in std_files.items()},
              "after": {},
              "ports": {n: run(raw / f"port{n}.s1p") for n in range(1, 7)}}
     for part in ("before", "ports"):
         for r in block[part].values():
-            assert np.array_equal(ecal.read_s1p(raw / "port1.s1p")[0], freq)
+            assert np.array_equal(ecal.read_touchstone(raw / "port1.s1p")[0], freq)
     return {"take_id": "nist-end-user", "freq": freq, "temp_k": None, "channels": list(range(1, 7)),
             "cfg": {"correct_sparam": "S11", "ports": {f"RF{n}": f"port {n}" for n in range(1, 7)}},
             "repeats": [block]}
@@ -41,7 +41,8 @@ def test_reproduces_nists_corrected_data_on_all_six_ports():
     result = ecal.correct_take(take, definitions=NIST_NB / "ideals")
     worst = 0.0
     for n in range(1, 7):
-        f, want = ecal.read_s1p(NIST_NB / "correcteddata" / f"port{n}_corrected.s1p")
+        f, want = ecal.read_touchstone(NIST_NB / "correcteddata" / f"port{n}_corrected.s1p")
+        want = want["S11"]
         np.testing.assert_allclose(result["freq"], f, rtol=1e-12)
         got = result["corrected"][0][n]
         worst = max(worst, np.max(np.abs(got - want)))
@@ -73,8 +74,15 @@ def test_nist_definitions_for():
 def test_find_definitions_on_this_laptop():
     if not (LAB.parents[2] / "nist_MM4250_calibration_data_2025").is_dir():
         pytest.skip("NIST data not beside this repo")
-    assert ecal.find_definitions("295K").name == "tier2_295k1"
-    assert ecal.find_definitions("3K").name == "tier2_3k1"
+    nist = LAB.parents[2] / "nist_MM4250_calibration_data_2025" / "tier2_scikitrf_caldata"
+    for which, tier2 in (("295K", "tier2_295k1"), ("3K", "tier2_3k1")):
+        found = ecal.find_definitions(which)
+        # lab/ideals_<T>/ (the copy that goes to the DAQ) wins over NIST's folder above;
+        # either way the files must be NIST's own, byte for byte.
+        assert found.name in (f"ideals_{which}", tier2)
+        names = sorted(p.name for p in (nist / tier2).glob("*.s1p"))
+        assert sorted(p.name for p in found.glob("*.s1p")) == names and len(names) == 18
+        assert all((found / n).read_bytes() == (nist / tier2 / n).read_bytes() for n in names)
     with pytest.raises(ValueError):
         ecal.find_definitions("77K")
 

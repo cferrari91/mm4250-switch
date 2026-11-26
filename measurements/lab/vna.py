@@ -1,399 +1,97 @@
 """
-The instruments: VNA sweep setup, one 2-port measurement per switch
-position, the fridge temperature, and the measurement sequences (a take,
-the stuck check, the thru check).
+The take, the stuck check and the thru check: a list of switch positions, each measured
+with the lab's scripts/switch_vna.py (`sv`). sv does the safe parts: no hot switching,
+the power cap, raw data only, port 2 off in forward mode.
 
-Nothing here writes files. Each sequence hands every position to a
-`save` function as soon as it is measured (db.Saver), so a sequence that
-dies halfway keeps what it already measured. Every sequence leaves the
-switch ALL_OPEN at the end, even when it dies (try/finally).
-
-Safety, kept from the older vna_measure.py / sweep_db.py:
-
-  * No hot switching: the switch only moves through select(), which
-    turns the VNA source off for the move and waits SWITCH_SETTLE_S.
-  * Power ceiling MAX_POWER_DBM (0 dBm), checked when the sweep is set
-    and again before every sweep.
-  * Raw data only: a sequence refuses to start if the VNA's own
-    correction is on (check_correction_off).
-  * The lab driver's switch.state() readback lags (the board's replies
-    queue up), so this code only ever sets the switch; to print what was
-    last sent, use switch.state.cache.get(get_if_invalid=False).
-  * The fridge is optional: a missing fridge, an error or a None reading
-    gives no temperature, never a stopped run.
-
-Copied from vna_measure.py and sweep_db.py (2026-11-08) so this folder
-stands alone; see those files' history for the longer reasoning.
+After each position the sequence calls save(name, freq, data, metadata) (db.Saver), so a
+sequence that dies halfway keeps what it measured. The switch is always left ALL_OPEN.
 """
 
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 
-# Highest source power this code will set or sweep at, in dBm. 0 dBm is
-# the most the P5004B delivers levelled across its whole range, 7 dB under
-# receiver compression at 10 GHz, 27 dB under damage, and 4 dB under the
-# MM4250's 0.5 V hot-switching limit. power=-20 and power=20 are one
-# keystroke apart, so this is enforced, not documented. To go higher on
-# purpose, raise it visibly: `vna.MAX_POWER_DBM = 5.0`.
-MAX_POWER_DBM = 0.0
+# scripts/switch_vna.py lives in the framework folder above this one: put that folder on sys.path.
+_HERE = Path(__file__).resolve().parent
+_ROOT = next((p for p in (_HERE, *_HERE.parents) if (p / "scripts" / "switch_vna.py").is_file()), None)
+if _ROOT is not None and str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+try:
+    from scripts import switch_vna as sv
+except ImportError as e:
+    raise ImportError("This code needs the lab framework's scripts/switch_vna.py: run it from inside "
+                      "QCoDeS-Measurement-Framework, or put that folder on sys.path.") from e
 
-# Slack when reading power back (the source has finite resolution).
-POWER_READBACK_SLACK_DB = 0.05
+STANDARDS = sv.STATES        # ALL_OPEN (the open), INTERNAL_SHORT, INTERNAL_LOAD
 
-# The four S-parameters of a 2-port measurement, in reading order (not
-# Touchstone order: that is S11, S21, S12, S22, see db.save_touchstone).
-SPARAMS = ("S11", "S12", "S21", "S22")
-
-# Wait after moving the switch, source still off. Menlo's cryogenic app
-# note (APN-0021) wants ~25 ms through filtered fridge wiring; 50 ms is twice that.
-SWITCH_SETTLE_S = 0.05
-
-# The switch's internal standards, in the order a take measures them.
-# ALL_OPEN is the open standard (Menlo's "ALL OFF", NIST's ecal_open).
-STANDARDS = ("ALL_OPEN", "INTERNAL_SHORT", "INTERNAL_LOAD")
-
-
-# ---------------------------------------------------------------------------
-# Sweep setup and the VNA's state
-# ---------------------------------------------------------------------------
 
 def setup_sweep(vna, sweep):
-    """
-    Set the VNA from the cooldown file's "sweep" block
-    ({"start_hz", "stop_hz", "points", "if_bandwidth_hz", "power_dbm"}),
-    turn its own correction off (this code measures raw), set the trigger
-    to IMM and the source on. Refuses power above MAX_POWER_DBM.
-    """
-    power = sweep["power_dbm"]
-    if power > MAX_POWER_DBM:
-        raise ValueError(f"Refusing {power:g} dBm: the ceiling is {MAX_POWER_DBM:g} dBm "
-                         "(vna.MAX_POWER_DBM). Fix power_dbm in the cooldown file.")
-    vna.start(sweep["start_hz"])
-    vna.stop(sweep["stop_hz"])
-    vna.points(sweep["points"])
-    vna.if_bandwidth(sweep["if_bandwidth_hz"])
-    vna.power(power)
-    vna.write("SENS:CORR:CSET:DEAC")      # raw data: the VNA's own cal off
-    vna.trigger_source("IMM")              # or the sweep waits forever for a trigger
-    vna.output(True)                       # or the sweep records the noise floor
-    print(f"VNA: {sweep['start_hz'] / 1e6:g}-{sweep['stop_hz'] / 1e6:g} MHz, "
-          f"{sweep['points']} points, IF {sweep['if_bandwidth_hz']:g} Hz, {power:g} dBm, "
-          "correction off")
-
-
-# Settings that change what a measurement means but aren't in a
-# Touchstone file. Recorded on every run as vna_<key> (best effort).
-VNA_STATE_QUERIES = {
-    "correction_enabled": "SENS:CORR:STAT?",
-    "port_extensions_enabled": "SENS:CORR:EXT:STAT?",
-    "fixturing_enabled": "CALC:FSIM:STAT?",
-}
-TRACE_STATE_QUERIES = {
-    "electrical_delay_s": "CALC:CORR:EDEL:TIME?",
-    "smoothing_enabled": "CALC:SMO:STAT?",
-    "trace_math": "CALC:MATH:FUNC?",
-}
-
-# Queries this VNA refused once; not asked again (each costs a VISA timeout).
-_UNSUPPORTED_QUERIES = set()
-
-
-def _try_ask(instrument, query):
-    """The reply as a number (or text), or None if the instrument won't answer."""
-    if query in _UNSUPPORTED_QUERIES:
-        return None
-    try:
-        reply = instrument.ask(query).strip().strip('"')
-    except Exception:
-        _UNSUPPORTED_QUERIES.add(query)
-        return None
-    try:
-        value = float(reply)
-    except ValueError:
-        return reply
-    return int(value) if value.is_integer() else value
-
-
-def instrument_state(vna):
-    """The VNA settings that decide what a measurement means, as vna_* metadata."""
-    state = {
-        "vna_start_hz": vna.start(),
-        "vna_stop_hz": vna.stop(),
-        "vna_points": vna.points(),
-        "vna_if_bandwidth_hz": vna.if_bandwidth(),
-        "vna_power_dbm": vna.power(),
-        "vna_sweep_type": vna.sweep_type(),
-        "vna_averages": vna.averages() if vna.averages_enabled() else 1,
-    }
-    for key, query in VNA_STATE_QUERIES.items():
-        state[f"vna_{key}"] = _try_ask(vna, query)
-    existing = {tr.trace(): tr for tr in vna.traces}
-    for sparam in SPARAMS:
-        if sparam in existing:
-            for key, query in TRACE_STATE_QUERIES.items():
-                state[f"vna_{key}_{sparam}"] = _try_ask(existing[sparam], query)
-    return state
-
-
-def check_correction_off(vna):
-    """Refuse to measure with the VNA's own correction on: this code wants raw data."""
-    corr = _try_ask(vna, VNA_STATE_QUERIES["correction_enabled"])
-    if corr not in (0, 1):
-        raise RuntimeError(f"Couldn't read the VNA's correction state (SENS:CORR:STAT? -> "
-                           f"{corr!r}); nothing was measured.")
-    if corr == 1:
-        raise RuntimeError("VNA correction is ON. This code measures raw data: turn it off "
-                           "with ksvna.write('SENS:CORR:CSET:DEAC') (setup_sweep does). "
-                           "Nothing was measured.")
-
-
-def _check_ready(vna):
-    """Refuse a sweep that can't finish or would record the wrong thing."""
-    power = vna.power()
-    if power > MAX_POWER_DBM + POWER_READBACK_SLACK_DB:
-        raise RuntimeError(f"VNA source power is {power:g} dBm, above the {MAX_POWER_DBM:g} "
-                           "dBm ceiling. Run setup_sweep.")
-    if vna.trigger_source() != "IMM":
-        raise RuntimeError("VNA trigger source isn't IMM, so the sweep would wait forever. "
-                           "Run setup_sweep.")
-    if not vna.output():
-        raise RuntimeError("VNA RF output is off, so the sweep would record the noise floor. "
-                           "Run setup_sweep.")
-    _frequency_axis(vna)
-    for key in ("fixturing_enabled", "port_extensions_enabled"):
-        if _try_ask(vna, VNA_STATE_QUERIES[key]):
-            print(f"[WARNING] VNA {key.replace('_enabled', '')} is ON: baked into the data. "
-                  f"Recorded as vna_{key}.")
-
-
-def _frequency_axis(vna):
-    """
-    The sweep's frequency points, computed from start/stop/points (exact,
-    unlike a float32 query). Linear and log sweeps only: for any other
-    type the computed axis would be wrong without looking wrong.
-    """
-    axis = {"LIN": "frequency_axis", "LOG": "frequency_log_axis"}.get(vna.sweep_type())
-    if axis is None:
-        raise RuntimeError(f"VNA sweep type is {vna.sweep_type()!r}; only LIN/LOG are "
-                           f"supported. Set {vna.name}.sweep_type('LIN').")
-    return getattr(vna, axis)()
-
-
-# ---------------------------------------------------------------------------
-# One measurement
-# ---------------------------------------------------------------------------
-
-def _add_trace(vna):
-    """
-    Add one trace and return it. The driver's add_trace() can raise or
-    return the wrong trace (it zips catalogs of different lengths), so
-    the new trace is found by diffing the catalog by name.
-    """
-    before = {tr.trace_name for tr in vna.traces}
-    try:
-        vna.add_trace()
-    except RuntimeError:
-        pass                                    # the trace was made anyway
-    added = [tr for tr in vna.traces if tr.trace_name not in before]
-    if len(added) != 1:
-        raise RuntimeError(f"Expected one new trace on the VNA, found {len(added)}.")
-    return added[0]
-
-
-def _ensure_traces(vna):
-    """A trace for each of SPARAMS, reusing existing ones."""
-    existing = {tr.trace(): tr for tr in vna.traces}
-    traces = []
-    for sparam in SPARAMS:
-        tr = existing.get(sparam)
-        if tr is None:
-            tr = _add_trace(vna)
-            tr.trace(sparam)
-            existing[sparam] = tr
-        traces.append(tr)
-    return traces
-
-
-def _read_sdata(trace, vna):
-    """
-    One trace's complex data, from SDATA (corrected but unformatted), so
-    electrical delay, offsets, smoothing and trace math set on the screen
-    never reach the saved numbers.
-    """
-    vna.active_trace(trace.trace_num)
-    raw = np.asarray(vna.visa_handle.query_binary_values(
-        "CALC:DATA? SDATA", datatype="f", is_big_endian=True), dtype=np.float64)
-    points = vna.points()
-    if raw.size != 2 * points:
-        raise RuntimeError(f"Expected {2 * points} numbers for {points} points, got "
-                           f"{raw.size}. The sweep may have been interrupted.")
-    return raw.reshape((-1, 2)).view(np.complex128).ravel()
-
-
-def select(position, vna, switch):
-    """
-    Move the switch to `position` (a channel 1-6 or a state name like
-    "ALL_OPEN") with the VNA source off during the move: the MM4250 is an
-    ohmic MEMS switch, and moving it with RF on (hot switching) wears the
-    contacts until a channel sticks. The source is restored even if the
-    switch refuses. Setting switch.channel()/state() by hand skips this.
-    """
-    source_was_on = vna.output()
-    if source_was_on:
-        vna.output(False)
-    try:
-        if isinstance(position, str):
-            switch.state(position)
-        else:
-            switch.channel(position)
-        time.sleep(SWITCH_SETTLE_S)
-    finally:
-        if source_was_on:
-            vna.output(True)
-    print(f"Switch set to {position_name(position)}" + (" (source off during the move)"
-                                                        if source_was_on else ""))
-
-
-def measure_2port(position, vna, switch):
-    """
-    Move the switch to `position` (source off), trigger ONE sweep and read
-    all four S-parameters from it. Returns (freq_hz, {"S11": ..., ...}),
-    raw at the VNA's ports.
-    """
-    select(position, vna, switch)
-    _check_ready(vna)
-    traces = _ensure_traces(vna)
-    prev_mode = traces[0].run_sweep()           # leaves the VNA in HOLD
-    try:
-        data = {sparam: _read_sdata(tr, vna) for sparam, tr in zip(SPARAMS, traces)}
-    finally:
-        vna.sweep_mode(prev_mode)               # or the screen freezes after every sweep
-    return _frequency_axis(vna), data
-
-
-def leave_switch_open(vna, switch):
-    """
-    Get the switch to ALL_OPEN whatever state the VNA is in. Never raises,
-    so the error that ended a sequence is the one you see. If the VNA is
-    what failed, select() can't reach the switch, so fall back to the
-    switch's own USB link (at -20 dBm far inside the hot-switching limit).
-    """
-    try:
-        select("ALL_OPEN", vna, switch)
-        return
-    except Exception as e:
-        print(f"  [warning] couldn't open the switch the normal way ({type(e).__name__}: {e})")
-    try:
-        vna.output(False)
-    except Exception:
-        pass
-    try:
-        switch.open_all()
-        print("  [warning] switch opened directly: ALL_OPEN")
-    except Exception as e:
-        print(f"  [WARNING] SWITCH MAY STILL BE CLOSED -- run switch.open_all() by hand "
-              f"({type(e).__name__}: {e})")
-
-
-def position_name(position):
-    """4 -> "RF4", "ALL_OPEN" -> "ALL_OPEN"."""
-    return position if isinstance(position, str) else f"RF{position}"
-
-
-# ---------------------------------------------------------------------------
-# Fridge temperature (optional)
-# ---------------------------------------------------------------------------
-
-def read_temperature(fridge):
-    """
-    The mixing plate (fridge.mxp, the switch's plate) in kelvin, or None:
-    no fridge, an error, or the driver's None (no calibration curve for
-    that range). Never raises.
-    """
-    if fridge is None:
-        return None
-    try:
-        value = fridge.mxp.temperature()
-        if value is None or isinstance(value, bool):
-            return None
-        value = float(value)
-        return value if value > 0 else None
-    except Exception as e:
-        print(f"  [warning] no fridge reading ({type(e).__name__}: {e})")
-        return None
+    """Set the VNA from a sweep block: the cooldown file's band and IF bandwidth plus the
+    notebook's points, power and mode (db.with_sweep)."""
+    missing = [k for k in ("points", "power_dbm") if k not in sweep]
+    if missing:
+        raise ValueError(f"No {' or '.join(missing)} for the sweep: pass "
+                         "db.with_sweep(cfg, POINTS, POWER_DBM, SWEEP_MODE), not the bare cooldown file")
+    sv.setup_vna(vna, sweep["start_hz"], sweep["stop_hz"], points=sweep["points"],
+                 power_dbm=sweep["power_dbm"], if_bandwidth_hz=sweep["if_bandwidth_hz"],
+                 mode=sweep.get("mode", sv.DEFAULT_SWEEP_MODE))
 
 
 def temp_label(kelvin):
-    """295.2 -> "295K", 0.012 -> "12mK", None -> "noT" (for names and titles)."""
+    """295.2 -> "295K", 0.012 -> "12mK", None -> "noT" (for folder names and titles)."""
     if kelvin is None:
         return "noT"
     return f"{kelvin:.0f}K" if kelvin >= 1 else f"{kelvin * 1e3:.0f}mK"
 
 
-# ---------------------------------------------------------------------------
-# Sequences
-# ---------------------------------------------------------------------------
-
-def run_positions(positions, vna, switch, fridge=None, on_each=None):
-    """
-    Measure each position in order (a channel 1-6 or a state name) and
-    call on_each(step, position, freq, data, temp_k) right after each one
-    (step counts from 1). Returns a list of (position, freq, data, temp_k).
-    The switch is left ALL_OPEN at the end, even if this dies partway.
-    """
-    out = []
-    try:
-        for step, position in enumerate(positions, 1):
-            temp_k = read_temperature(fridge)
-            freq, data = measure_2port(position, vna, switch)
-            if on_each is not None:
-                on_each(step, position, freq, data, temp_k)
-            out.append((position, freq, data, temp_k))
-    finally:
-        leave_switch_open(vna, switch)
-    return out
-
-
-def new_id():
-    """A timestamp id to the millisecond, e.g. "20261108T141502.318"."""
-    return datetime.now().strftime("%Y%m%dT%H%M%S.%f")[:-3]
-
-
-def _common(cfg, temp_k):
-    """What every run of a take or check carries."""
-    return {"cooldown": cfg["cooldown"], "switch_serial": cfg["switch_serial"],
-            "start_temp_k": temp_k, "temp_str": temp_label(temp_k),
-            "cooldown_json": cfg["_text"]}
+def port_channels(cfg):
+    """The channel numbers in the cooldown file's ports, sorted: [1, 2, ...]."""
+    return sorted(int(name[2:]) for name in cfg["ports"])
 
 
 def _start(cfg, vna, fridge):
-    """Before anything moves: sweep from the file, correction off, first temperature."""
+    """Before anything moves: set the VNA, check it, read the fridge. Returns (mode, temp_k,
+    the metadata every run of this sequence carries)."""
+    mode = cfg["sweep"].get("mode", sv.DEFAULT_SWEEP_MODE)
     setup_sweep(vna, cfg["sweep"])
-    check_correction_off(vna)
-    temp_k = read_temperature(fridge)
+    sv.check_ready(vna, mode)                     # refuse now, before the switch moves
+    temp_k = sv.read_temperatures(fridge)["mxp"]
     print(f"Fridge (mixing plate): {temp_label(temp_k) if temp_k else 'no reading'}")
-    return temp_k
+    common = {"cooldown": cfg["cooldown"], "switch_serial": cfg["switch_serial"],
+              "start_temp_k": temp_k, "temp_str": temp_label(temp_k),
+              "vna_sweep_mode": mode, "cooldown_json": cfg["_text"]}
+    return mode, temp_k, common
+
+
+def run_positions(positions, vna, switch, fridge, on_each, mode):
+    """Measure each position in order (sv.measure) and call on_each(step, position, result)
+    right after it (step counts from 1). Always ends ALL_OPEN. Returns the results."""
+    out = []
+    try:
+        for step, pos in enumerate(positions, 1):
+            r = sv.measure(switch, vna, pos, fridge=fridge, mode=mode)
+            on_each(step, pos, r)
+            out.append(r)
+    finally:
+        sv.all_open(switch, vna)
+    return out
 
 
 def take(cfg, vna, switch, fridge=None, channels=None, note="", save=None):
     """
-    One take: the internal standards, each chosen channel, the standards
-    again (the drift check), `cfg["repeats"]` times; every position a
-    2-port measurement.
+    One take, `cfg["repeats"]` times:
 
         ALL_OPEN, INTERNAL_SHORT, INTERNAL_LOAD     standards, when="before"
         RF<n> for each channel                      kind "raw"
-        ALL_OPEN, INTERNAL_SHORT, INTERNAL_LOAD     standards, when="after"
+        ALL_OPEN, INTERNAL_SHORT, INTERNAL_LOAD     standards, when="after" (the drift check)
 
-    channels: None = every port in the cooldown file, or a list like [4].
-    A one-channel take still measures both sets of standards (the
-    correction needs them). save(name, freq, data, metadata) is called
-    after each position (db.Saver); it returns a run id or None.
-
-    Returns {"take_id", "temp_k", "temp_str", "channels", "repeats":
-    [{"before": {state: run_id}, "ports": {ch: run_id}, "after": {...}}]}.
+    channels: None = every port in the cooldown file, or e.g. [4] (the standards are still
+    measured: the correction needs them). save: db.Saver (or None).
+    Returns {"take_id", "temp_k", "temp_str", "channels", "repeats": [{"before": {state:
+    run_id}, "ports": {ch: run_id}, "after": {...}}]}.
     """
     ports = port_channels(cfg)
     channels = ports if channels is None else list(channels)
@@ -406,53 +104,40 @@ def take(cfg, vna, switch, fridge=None, channels=None, note="", save=None):
     if len(set(channels)) != len(channels):
         raise ValueError(f"channels has duplicates: {channels}")
 
-    temp_k = _start(cfg, vna, fridge)
-    take_id = new_id()
-    print(f"Take {take_id}: {', '.join(f'RF{c}' for c in channels)}, "
-          f"{cfg['repeats']} repeat(s)")
-    common = dict(_common(cfg, temp_k), take_id=take_id, note=note or None)
+    mode, temp_k, common = _start(cfg, vna, fridge)
+    take_id = datetime.now().strftime("%Y%m%dT%H%M%S.%f")[:-3]     # e.g. 20261108T141502.318
+    print(f"Take {take_id}: {', '.join(f'RF{c}' for c in channels)}, {cfg['repeats']} repeat(s)")
+    common.update(take_id=take_id, note=note or None)
 
-    plan = []                                   # (position, metadata) in order
+    plan = []                                     # (position, metadata, when), in order
     for k in range(1, cfg["repeats"] + 1):
         for when, positions in (("before", STANDARDS), ("ports", channels), ("after", STANDARDS)):
             for pos in positions:
-                meta = dict(common, repeat=k, position=position_name(pos))
                 if when == "ports":
-                    meta.update(kind="raw", channel=pos, port=cfg["ports"][f"RF{pos}"])
+                    meta = {"kind": "raw", "channel": pos, "port": cfg["ports"][f"RF{pos}"]}
                 else:
-                    meta.update(kind="standard", standards_when=when)
-                plan.append((pos, meta, when))
-
+                    meta = {"kind": "standard", "standards_when": when}
+                plan.append((pos, dict(meta, repeat=k), when))
     repeats = [{"before": {}, "ports": {}, "after": {}} for _ in range(cfg["repeats"])]
 
-    def on_each(step, pos, freq, data, t):
-        _, meta, when = plan[step - 1]
-        meta = dict(meta, step=step, mxc_temp_k=t, **instrument_state(vna))
-        run_id = save(position_name(pos), freq, data, meta) if save else None
-        repeats[meta["repeat"] - 1][when][pos] = run_id
+    def on_each(step, pos, r):
+        _, extra, when = plan[step - 1]
+        meta = {**common, **r["labels"], **extra, "step": step}
+        run_id = save(sv.position_name(pos), r["freq"], r["data"], meta) if save else None
+        repeats[extra["repeat"] - 1][when][pos] = run_id
 
-    run_positions([p for p, _, _ in plan], vna, switch, fridge, on_each)
+    run_positions([p for p, _, _ in plan], vna, switch, fridge, on_each, mode)
     print(f"Take {take_id} complete.")
     return {"take_id": take_id, "temp_k": temp_k, "temp_str": temp_label(temp_k),
             "channels": channels, "repeats": repeats}
 
 
-def port_channels(cfg):
-    """The channel numbers listed in the cooldown file's ports, sorted: [1, 2, ...]."""
-    return sorted(int(name[2:]) for name in cfg["ports"])
-
-
 def stuck_check(cfg, vna, switch, fridge=None, save=None):
     """
-    ALL_OPEN, INTERNAL_SHORT, ALL_OPEN, INTERNAL_LOAD, ALL_OPEN, then each
-    port in the cooldown file followed by ALL_OPEN. Each position is
-    compared with the first ALL_OPEN: median |S21 - first ALL_OPEN| (a
-    complex difference, so phase counts). Every ALL_OPEN should be small
-    and every closed position clearly bigger; see stuck_verdicts().
-
-    save(name, freq, data, metadata) is called after each position, as in
-    take(). Returns {"check_id", "temp_k", "rows", "freq"}; each row is
-    {"step", "position", "label", "s21", "diff", "temp_k", "run_id"}.
+    ALL_OPEN, INTERNAL_SHORT, ALL_OPEN, INTERNAL_LOAD, ALL_OPEN, then each port in the
+    cooldown file with ALL_OPEN after it. Each position's "diff" is median |S21 - the first
+    ALL_OPEN| (complex, so phase counts). Read it with stuck_verdicts / print_check.
+    Returns {"check", "check_id", "temp_k", "rows", "freq"}.
     """
     seq = ["ALL_OPEN", "INTERNAL_SHORT", "ALL_OPEN", "INTERNAL_LOAD", "ALL_OPEN"]
     for ch in port_channels(cfg):
@@ -462,14 +147,11 @@ def stuck_check(cfg, vna, switch, fridge=None, save=None):
 
 def thru_check(cfg, vna, switch, fridge=None, save=None, ask=input):
     """
-    The thru check through fridge line lines.thru, which is wired to switch
-    channel thru_channel. Asks you to move VNA port 1's cable from the input
-    line to the thru line (Enter; n stops before anything moves), measures
-    ALL_OPEN, RF<thru>, ALL_OPEN, RF<thru>, ALL_OPEN, then asks you to move
-    the cable back. S21 is then a transmission: high with the channel
-    closed, at the switch's isolation with it open. Returns the same shape
-    as stuck_check, plus "gap_db" (worst closed minus worst open median
-    |S21|, dB) and "passed" (None with no thru_pass_db in the file).
+    The thru check: asks you to move VNA port 1's cable to the thru line (Enter; n stops
+    before anything moves), measures ALL_OPEN, RF<thru>, ALL_OPEN, RF<thru>, ALL_OPEN, then
+    asks you to move it back. S21 is then a transmission: high closed, low open.
+    Same return as stuck_check, plus "gap_db" (worst closed minus worst open median |S21|)
+    and "passed" (None if the cooldown file has no thru_pass_db).
     """
     ch = cfg["thru_channel"]
     if ch is None:
@@ -482,13 +164,11 @@ def thru_check(cfg, vna, switch, fridge=None, save=None, ask=input):
         print("Stopped: nothing was measured.")
         return None
     try:
-        out = _check("thru", ["ALL_OPEN", ch, "ALL_OPEN", ch, "ALL_OPEN"],
-                     cfg, vna, switch, fridge, save)
+        out = _check("thru", ["ALL_OPEN", ch, "ALL_OPEN", ch, "ALL_OPEN"], cfg, vna, switch, fridge, save)
     finally:
         ask(f"Now move VNA port 1's cable back to line {lines['input']}, then press Enter: ")
-    level = {r["step"]: 20 * np.log10(np.median(np.abs(r["s21"]))) for r in out["rows"]}
     for r in out["rows"]:
-        r["level_db"] = level[r["step"]]
+        r["level_db"] = 20 * np.log10(np.median(np.abs(r["s21"])))
     closed = [r["level_db"] for r in out["rows"] if r["position"] == ch]
     opened = [r["level_db"] for r in out["rows"] if r["position"] == "ALL_OPEN"]
     out["gap_db"] = min(closed) - max(opened)
@@ -498,50 +178,45 @@ def thru_check(cfg, vna, switch, fridge=None, save=None, ask=input):
 
 
 def _check(check, seq, cfg, vna, switch, fridge, save):
-    temp_k = _start(cfg, vna, fridge)
-    check_id = new_id()
+    """Measure `seq` for a stuck or thru check; one row per position."""
+    mode, temp_k, common = _start(cfg, vna, fridge)
+    check_id = datetime.now().strftime("%Y%m%dT%H%M%S.%f")[:-3]
     print(f"{check.capitalize()} check {check_id}: {len(seq)} positions")
+    common.update(check_type=check, check_id=check_id)
     rows = []
-    common = dict(_common(cfg, temp_k), check_type=check, check_id=check_id)
 
-    def on_each(step, pos, freq, data, t):
-        ref = rows[0]["s21"] if rows else data["S21"]          # the first ALL_OPEN
-        diff = float(np.median(np.abs(data["S21"] - ref)))
-        name = position_name(pos)
+    def on_each(step, pos, r):
+        s21 = r["data"]["S21"]
+        diff = float(np.median(np.abs(s21 - (rows[0]["s21"] if rows else s21))))   # vs the first ALL_OPEN
+        name = sv.position_name(pos)
         port = cfg["ports"].get(name) if not isinstance(pos, str) else None
-        meta = dict(common, step=step, position=name, port=port, mxc_temp_k=t,
-                    median_abs_s21_minus_first_open=diff, **instrument_state(vna))
-        run_id = save(name, freq, data, meta) if save else None
+        meta = {**common, **r["labels"], "step": step, "port": port,
+                "median_abs_s21_minus_first_open": diff}
+        run_id = save(name, r["freq"], r["data"], meta) if save else None
+        temps = {k: v for k, v in r["labels"].items() if k.endswith(("_k_before", "_k_after"))}
         rows.append({"step": step, "position": pos, "label": name + (f" ({port})" if port else ""),
-                     "s21": data["S21"], "diff": diff, "temp_k": t, "run_id": run_id})
+                     "s21": s21, "diff": diff, "temp_k": r["labels"]["mxc_temp_k"], "temps": temps,
+                     "run_id": run_id})
 
-    measured = run_positions(seq, vna, switch, fridge, on_each)
+    measured = run_positions(seq, vna, switch, fridge, on_each, mode)
     return {"check": check, "check_id": check_id, "temp_k": temp_k, "rows": rows,
-            "freq": measured[0][1] if measured else None}
+            "freq": measured[0]["freq"] if measured else None}
 
 
 def stuck_verdicts(result, pass_db=None):
     """
-    Read a stuck check by comparing each position with its neighbours (the
-    chain's gain drifts while the fridge cools, so fixed levels don't work):
+    Read a stuck check by comparing each position with its neighbours (the chain drifts while
+    the fridge cools, so fixed levels don't work). Contrasts in dB:
 
-      closed position P:
-          contrast = median|S21_P - the ALL_OPEN before it| / open-to-open noise
-          (open-to-open noise: the median, over every pair of consecutive
-          ALL_OPENs, of median|difference|; one stuck channel only spoils one pair)
-      ALL_OPEN right after P:
-          contrast = median|S21_open - S21_P| / median|S21_open - open before P|
-          (it should look like the earlier ALL_OPEN, not like P)
+      closed position P:  median|P - the ALL_OPEN before it| / open-to-open noise
+                          (noise: median over consecutive ALL_OPEN pairs, so one stuck
+                          channel only spoils one pair)
+      ALL_OPEN after P:   median|open - P| / median|open - the ALL_OPEN before P|
 
-    both in dB. Healthy rows are well above 0 dB; ~0 dB or below means the
-    two things it compares can't be told apart. With pass_db (the cooldown
-    file's stuck_check.pass_db): a closed position below it is flagged
-    "STUCK OPEN?"; an ALL_OPEN below it (after a position that wasn't
-    itself flagged) "not open after <P>: STUCK CLOSED?". Once one channel
-    is stuck closed, later rows can be flagged too: the first flag is the
-    one that counts. pass_db None: numbers only, nothing flagged.
-    Adds "contrast_db" (None for the first row) and "flag" to each row;
-    returns the list of flags.
+    Healthy rows are well above 0 dB. With pass_db, a closed position below it is flagged
+    "STUCK OPEN?" and an ALL_OPEN below it "STUCK CLOSED?" (the first flag is the one that
+    counts). pass_db None: numbers only. Adds "contrast_db" and "flag" to each row; returns
+    the flags.
     """
     rows = result["rows"]
     tiny = np.finfo(float).tiny
@@ -557,7 +232,7 @@ def stuck_verdicts(result, pass_db=None):
         if i == 0 or before is None:
             continue
         if not is_open(r):
-            if noise is None:                       # stopped before a second ALL_OPEN
+            if noise is None:                     # stopped before a second ALL_OPEN
                 continue
             r["contrast_db"] = 20 * np.log10(med(r, before) / noise)
             if pass_db is not None and r["contrast_db"] < pass_db:
@@ -578,7 +253,7 @@ def stuck_verdicts(result, pass_db=None):
 
 
 def print_check(result, pass_db=None):
-    """Print a stuck check's table (stuck_verdicts) or a thru check's levels."""
+    """Print a stuck check's table (with stuck_verdicts) or a thru check's levels."""
     if result["check"] == "thru":
         for r in result["rows"]:
             print(f"{r['label']:>24}  median |S21| = {r['level_db']:6.1f} dB")
@@ -605,3 +280,235 @@ def print_check(result, pass_db=None):
     else:
         print(f"\nNothing flagged (pass mark {pass_db:g} dB).")
     return flags
+
+
+# ---------------------------------------------------------------------------
+# Gate (HV line) test: each gate line of a channel on its own
+# ---------------------------------------------------------------------------
+#
+# Each RF channel closes 4 HV gate lines (Menlo pinout; the driver's STATE_HV_PINS), e.g.
+# RF4 = HV2 + HV8 (shared with RF3 and RF5) + HV10 + HV16 (RF4's own). The stuck check only
+# sees whole channels: a gate that's frozen closed behind one that opens, or one of a
+# channel's own gates that won't close while the others do, can pass it. This sends gate
+# combinations that aren't in Menlo's state table, straight to the driver board, to see
+# what each gate does. Source off for every move; always ends ALL_OPEN.
+
+HV_LINES = range(1, 23)          # the driver board's HV1-HV22 (one Micro-D bus)
+
+
+def _hv_num(line):
+    """10, "HV10", "hv10" -> 10. Anything outside HV1-HV22: ValueError."""
+    s = str(line).strip().upper()
+    n = int(s[2:]) if s.startswith("HV") else int(s)
+    if n not in HV_LINES:
+        raise ValueError(f"{line!r} isn't an HV line (HV1-HV22)")
+    return n
+
+
+def hv_label(lines):
+    """(2, 8, 10) -> "HV2+HV8+HV10"."""
+    return "+".join(f"HV{n}" for n in sorted({_hv_num(x) for x in lines}))
+
+
+def hv_wire_bytes(lines):
+    """
+    The 6 bytes that energize exactly these HV lines (Menlo's API, MM4250DriverBoardAPI.md):
+    per Micro-D bus (NA NA HV22..HV17)(HV16..HV9)(HV8..HV1), the same on bus A and bus B,
+    like every one of Menlo's own states. hv_wire_bytes([]) is ALL_OPEN.
+    """
+    nums = {_hv_num(x) for x in lines}
+    hi = sum(1 << (n - 17) for n in nums if n >= 17)
+    mid = sum(1 << (n - 9) for n in nums if 9 <= n <= 16)
+    lo = sum(1 << (n - 1) for n in nums if n <= 8)
+    return (hi, mid, lo) * 2
+
+
+def _driver_tables(switch):
+    """The switch driver's {state: HV lines} and {state: wire bytes}, keyed by state name,
+    after checking hv_wire_bytes rebuilds every one of Menlo's states exactly (so the bit
+    layout here can't be off). Raises before anything moves."""
+    mod = sys.modules.get(type(switch).__module__)
+    pins, wire = getattr(mod, "STATE_HV_PINS", None), getattr(mod, "STATE_WIRE_BYTES", None)
+    if not pins or not wire:
+        raise RuntimeError(f"{type(switch).__name__}'s module has no STATE_HV_PINS / STATE_WIRE_BYTES: "
+                           "the gate test needs the lab MM4250 driver. Nothing moved.")
+    name = lambda k: getattr(k, "value", k)
+    pins = {name(k): tuple(_hv_num(x) for x in v) for k, v in pins.items()}
+    wire = {name(k): tuple(int(b) for b in v) for k, v in wire.items()}
+    bad = [s for s, b in wire.items() if hv_wire_bytes(pins.get(s, ())) != b]
+    if bad:
+        raise RuntimeError(f"hv_wire_bytes doesn't rebuild the driver's bytes for {bad}: the bit "
+                           "layout is wrong, so nothing was sent. Nothing moved.")
+    return pins, wire
+
+
+def hv_plan(channel, pins):
+    """
+    The gate combinations for one channel, in order: each of its lines alone, then its
+    shared lines (the ones another channel also uses), then shared + each own line. The full
+    channel is measured separately the normal way. Returns (combos, shared, own).
+    """
+    me = f"RFC_RF{channel}"
+    if me not in pins:
+        raise ValueError(f"No RF{channel} in the driver's STATE_HV_PINS")
+    lines = list(pins[me])
+    others = {n for s, ls in pins.items() if s.startswith("RFC_RF") and s != me for n in ls}
+    shared = [n for n in lines if n in others]
+    own = [n for n in lines if n not in others]
+    combos = [(n,) for n in lines]
+    if shared and own:
+        combos.append(tuple(shared))
+        combos += [tuple(shared + [o]) for o in own]
+    seen, out = set(), []
+    for c in combos:
+        key = tuple(sorted(c))
+        if key not in seen and set(key) != set(lines):
+            seen.add(key)
+            out.append(key)
+    return out, shared, own
+
+
+def _send_hv(switch, wire):
+    """Write 6 HV bytes to the driver board (load buffer, commit) and wait, like the driver does
+    for its own states. The driver's cached state is now wrong, so don't read switch.state()
+    until the next normal move (sv.all_open / set_switch write a full state)."""
+    switch._device.write([0x00, 0x00, *wire])     # 0x00: set output buffer
+    switch._device.write([0x00, 0x02])             # 0x02: write current buffer to the outputs
+    mod = sys.modules.get(type(switch).__module__)
+    time.sleep(getattr(mod, "TYPICAL_SWITCH_TIME_S", 0.025))   # the driver's own wait after a move
+
+
+def set_hv_lines(switch, vna, lines):
+    """Energize exactly `lines` (source off for the move, then back as it was)."""
+    wire = hv_wire_bytes(lines)
+    was_on = vna.output()
+    if was_on:
+        vna.output(False)
+    try:
+        _send_hv(switch, wire)
+        time.sleep(sv.SWITCH_SETTLE_S)
+    finally:
+        if was_on:
+            vna.output(True)
+    print(f"Switch: {hv_label(lines)} only (bytes {' '.join(f'{b:02X}' for b in wire)})"
+          + (" (source off during the move)" if was_on else ""))
+    return wire
+
+
+def _measure_hv(switch, vna, lines, fridge, mode):
+    """Like sv.measure, for a gate combination: same labels, plus the lines and bytes."""
+    sparams = sv._sparams(mode)
+    sv.check_ready(vna, mode)                     # before anything moves
+    wire = set_hv_lines(switch, vna, lines)
+    before = sv.read_temperatures(fridge)
+    data = sv._sweep(vna, sparams)
+    after = sv.read_temperatures(fridge)
+    freq = np.linspace(vna.start(), vna.stop(), vna.points())
+    labels = {"position": hv_label(lines), "channel": None, "mxc_temp_k": before["mxp"],
+              **{f"{s}_k_{when}": t[s] for when, t in (("before", before), ("after", after))
+                 for s in sv.FRIDGE_SENSORS},
+              **sv.vna_settings(vna), "vna_sweep_mode": mode,
+              "hv_lines": hv_label(lines), "hv_wire_bytes": " ".join(f"{b:02X}" for b in wire)}
+    return {"position": tuple(lines), "freq": freq, "data": data, "labels": labels}
+
+
+def hv_test(cfg, vna, switch, fridge=None, channels=(4,), save=None, ask=input, combos=None,
+            full=True):
+    """
+    The gate test, for each channel in `channels`:
+
+        ALL_OPEN, INTERNAL_SHORT, ALL_OPEN, INTERNAL_LOAD, ALL_OPEN       standards
+        each gate combination (hv_plan), ALL_OPEN after each
+        the channel the normal way, ALL_OPEN                              (full=False: skipped)
+        INTERNAL_SHORT, ALL_OPEN, INTERNAL_LOAD, ALL_OPEN                 standards again
+
+    combos: your own list of line sets instead of hv_plan, e.g. [["HV2", "HV8"], [2, 8, 10]],
+    for one channel (channels=[4]: the label and the NIST port for the "from connector"
+    column). Only lines that some Menlo state uses are allowed (HV4-6 and HV22 aren't).
+
+    Asks before anything moves (n stops). Same return as stuck_check (read it with
+    print_check, ecal.hv_positions, plots.plot_hv_test), each row with "hv_channel" and
+    "hv_role" ("alone", "shared", "shared+own", "custom", "full", or None for ALL_OPEN/standards).
+    """
+    pins, _ = _driver_tables(switch)              # also checks the byte layout
+    channels = [int(c) for c in channels]
+    used = {n for ls in pins.values() for n in ls}
+    if combos is not None:
+        if len(channels) != 1:
+            raise ValueError("combos needs exactly one channel (channels=[4]): nothing moved")
+        combos = [tuple(sorted({_hv_num(x) for x in c})) for c in combos]
+        if not combos or any(not c for c in combos):
+            raise ValueError("combos must be a list of non-empty line lists, e.g. [['HV2', 'HV8']]: nothing moved")
+        bad = sorted({n for c in combos for n in c} - used)
+        if bad:
+            raise ValueError(f"{', '.join(f'HV{n}' for n in bad)}: no Menlo state uses "
+                             f"{'it' if len(bad) == 1 else 'them'}, so not sent. Nothing moved.")
+    seq, roles = ["ALL_OPEN", "INTERNAL_SHORT", "ALL_OPEN", "INTERNAL_LOAD", "ALL_OPEN"], [None] * 5
+    lines_txt = []
+    for ch in channels:
+        if combos is None:
+            plan, shared, own = hv_plan(ch, pins)
+            head = f"  RF{ch}: shared {hv_label(shared) or '-'}, own {hv_label(own) or '-'}; "
+        else:
+            plan, shared, own = combos, None, None
+            head = f"  RF{ch} (yours): "
+        lines_txt.append(head + ", ".join(hv_label(c) for c in plan)
+                         + (f", then RF{ch} normally" if full else ""))
+        for c in plan:
+            if combos is not None:
+                role = "custom"
+            else:
+                role = "alone" if len(c) == 1 else ("shared" if set(c) == set(shared) else "shared+own")
+            seq += [c, "ALL_OPEN"]
+            roles += [(ch, role), None]
+        if full:
+            seq += [ch, "ALL_OPEN"]
+            roles += [(ch, "full"), None]
+    seq += ["INTERNAL_SHORT", "ALL_OPEN", "INTERNAL_LOAD", "ALL_OPEN"]
+    roles += [None] * 4
+
+    print("Gate test: these combinations are NOT in Menlo's state table (each line is still "
+          "0 V or ~90 V, as in a normal state; RF source off for every move).")
+    print("\n".join(lines_txt))
+    print(f"{len(seq)} positions in all, ending ALL_OPEN.")
+    reply = ask("Press Enter to start (n + Enter stops): ")
+    if str(reply).strip().lower() in ("n", "no"):
+        print("Stopped: nothing moved.")
+        return None
+
+    mode, temp_k, common = _start(cfg, vna, fridge)
+    check_id = datetime.now().strftime("%Y%m%dT%H%M%S.%f")[:-3]
+    print(f"Gate test {check_id}: {len(seq)} positions")
+    common.update(check_type="hv_lines", check_id=check_id)
+    rows, first_freq = [], None
+    try:
+        for step, (pos, role) in enumerate(zip(seq, roles), 1):
+            if isinstance(pos, tuple):
+                r = _measure_hv(switch, vna, pos, fridge, mode)
+            else:
+                r = sv.measure(switch, vna, pos, fridge=fridge, mode=mode)
+            ch, kind = role if role else (None, None)
+            if isinstance(pos, tuple):
+                name = f"RF{ch}_{hv_label(pos)}"
+            else:
+                name = sv.position_name(pos)
+            port = cfg["ports"].get(f"RF{pos}") if isinstance(pos, int) else None
+            s21 = r["data"]["S21"]
+            diff = float(np.median(np.abs(s21 - (rows[0]["s21"] if rows else s21))))
+            meta = {**common, **r["labels"], "step": step, "port": port, "hv_test_channel": ch,
+                    "hv_role": kind, "median_abs_s21_minus_first_open": diff}
+            if isinstance(pos, int):
+                meta["hv_lines"] = hv_label(pins[f"RFC_RF{pos}"])
+            run_id = save(name, r["freq"], r["data"], meta) if save else None
+            temps = {k: v for k, v in r["labels"].items() if k.endswith(("_k_before", "_k_after"))}
+            label = (f"RF{ch}: {hv_label(pos)}" if isinstance(pos, tuple) else
+                     name + (f" ({hv_label(pins[f'RFC_RF{pos}'])})" if isinstance(pos, int) else ""))
+            rows.append({"step": step, "position": pos if not isinstance(pos, tuple) else hv_label(pos),
+                         "label": label, "s21": s21, "diff": diff, "temp_k": r["labels"]["mxc_temp_k"],
+                         "temps": temps, "run_id": run_id, "hv_channel": ch, "hv_role": kind})
+            first_freq = r["freq"] if first_freq is None else first_freq
+    finally:
+        sv.all_open(switch, vna)                  # a full state: overwrites any gate combination
+    print(f"Gate test {check_id} complete.")
+    return {"check": "hv_lines", "check_id": check_id, "temp_k": temp_k, "rows": rows,
+            "freq": first_freq}

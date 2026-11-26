@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import qcodes
 
-from conftest import HERE, db, vna
+from conftest import HERE, LAB, db, ecal, vna
 
 
 @pytest.fixture(autouse=True)
@@ -74,12 +74,17 @@ def test_helper_found_on_disk_above_the_code(cfg, tmp_path, monkeypatch):
         "def setup_database(project, cooldown, name=None):\n    raise RuntimeError('found me')\n")
     import sys
     saved = {k: sys.modules.pop(k) for k in list(sys.modules) if k.split(".")[0] == "scripts"}
-    monkeypatch.setattr(sys, "path", list(sys.path))    # find_database_helper adds to it
+    monkeypatch.setattr(sys, "path", list(sys.path))    # open_database adds to it
+    cfg = db.load_cooldown(LAB / "cooldowns" / "CD05.json")
     try:
-        mod = db.find_database_helper(root / "Users" / "Charlie_Ferrari" / "lab")
-        with pytest.raises(RuntimeError, match="found me"):
-            mod.setup_database("MM4250", 5, "vna")
-        assert db.find_database_helper(tmp_path / "elsewhere") is None
+        monkeypatch.setattr(db, "HERE", root / "Users" / "Charlie_Ferrari" / "lab")
+        with pytest.raises(RuntimeError, match="found me"):        # it used the helper above it
+            db.open_database(cfg, "vna")
+        for k in [k for k in sys.modules if k.split(".")[0] == "scripts"]:
+            del sys.modules[k]
+        monkeypatch.setattr(db, "HERE", tmp_path / "elsewhere")
+        monkeypatch.setattr(db, "LOCAL_DB_DIR", tmp_path / "local")
+        assert db.open_database(cfg, "vna", create=False).parent == tmp_path / "local"   # none: local
     finally:   # don't leave this fake in sys.modules for other tests (tests/test_lab_databases.py)
         for k in [k for k in sys.modules if k.split(".")[0] == "scripts"]:
             del sys.modules[k]
@@ -149,7 +154,7 @@ def test_take_round_trip_export_reread_no_overwrite(cfg, rig, dbpath, ideals, ca
     paths = db.export_touchstone(ids, dbpath, out_dir=out)
     runs = db.load_runs(ids, dbpath)
     for run_id, path in zip(ids, paths):
-        f, data = db.read_touchstone(path)
+        f, data = ecal.read_touchstone(path)
         np.testing.assert_allclose(f, runs[run_id]["freq"], rtol=1e-12)
         for s, v in data.items():
             np.testing.assert_allclose(v, runs[run_id]["data"][s], rtol=1e-9, atol=1e-12)
@@ -166,7 +171,7 @@ def test_save_touchstone_never_overwrites(tmp_path):
     p = tmp_path / "x.s1p"
     assert db.save_touchstone(np.array([1e9]), np.array([0.5 + 0j]), p)
     assert not db.save_touchstone(np.array([1e9]), np.array([0.9 + 0j]), p)
-    assert db.read_touchstone(p)[1]["S11"][0] == 0.5
+    assert ecal.read_touchstone(p)[1]["S11"][0] == 0.5
 
 
 def test_load_take_errors(dbpath):
@@ -182,7 +187,13 @@ def test_backup_written_once_then_skipped(cfg, rig, dbpath, capsys):
     assert db.backup_db(dbpath.parent / "missing.db") is None      # never raises
 
 
-def test_metadata_values_are_cleaned():
-    assert db._clean_value(np.float64(1.5)) == 1.5 and type(db._clean_value(np.float64(1.5))) is float
-    assert db._clean_value(True) == 1 and db._clean_value([1, 2]) == "[1, 2]"
-    assert db._clean_value(None) is None
+def test_metadata_values_are_cleaned(dbpath):
+    """sv.store turns numpy numbers, bools and lists into plain columns and skips None."""
+    import sqlite3
+    labels = {"a_num": np.float64(1.5), "a_bool": True, "a_list": [1, 2], "a_none": None}
+    db.sv.store(dbpath, "x", np.array([1e9, 2e9]), {"S11": np.array([0.5, 0.4 + 0j])}, labels)
+    con = sqlite3.connect(dbpath)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(runs)")}
+    row = con.execute("SELECT a_num, a_bool, a_list FROM runs").fetchone()
+    con.close()
+    assert row == (1.5, 1, "[1, 2]") and "a_none" not in cols

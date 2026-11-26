@@ -1,30 +1,22 @@
 """
-Plots, from what db.py and vna.py return (no instruments, no e-cal math):
+Plots from what db.py, vna.py and analysis.py return (no instruments, no e-cal math):
 
     plot_take(db.load_take(None, DB))     # a take: raw and corrected, |S| and phase per channel
-    plot_check(result)                     # a stuck or thru check: raw |S21| + per-position bars
+    plot_check(result)                     # a stuck or thru check: raw |S21| + one bar per position
     plot_runs(db.load_runs([12, 13], DB))  # any runs
+    plot_mag_smith(traces)                 # |S| beside a Smith chart (analysis.traces_from_*)
 
-Every function returns the Figure; pass save="path.png" (or .pdf) to
-write it too (never overwrites an existing file).
+Every function returns the figure(s); save="path.png" also writes it (never overwrites).
 """
 
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
-
-
-def _plt():
-    import matplotlib.pyplot as plt
-    return plt
 
 
 def _db(x):
     return 20 * np.log10(np.maximum(np.abs(x), 1e-30))
-
-
-def _deg(x):
-    return np.rad2deg(np.angle(x))
 
 
 def _save(fig, save):
@@ -40,13 +32,10 @@ def _save(fig, save):
 
 def plot_take(take, definitions=None, save=None):
     """
-    A take (db.load_take): left, the raw trace the correction is solved on
-    (the cooldown file's correct_sparam, mean over repeats); right, the
-    corrected reflection at each channel's connector (mean over repeats),
-    |S| in dB on top and phase below. `definitions` picks which corrected
-    runs if a take has more than one kind (None = the newest saved).
+    A take: left, the raw trace the correction uses (mean over repeats); right, the corrected
+    reflection at each channel's connector. |S| in dB on top, phase below. `definitions`
+    picks which corrected runs if there are several (None = the newest).
     """
-    plt = _plt()
     sparam = take["cfg"]["correct_sparam"]
     ports = take["cfg"]["ports"]
     corr = take["corrected"]
@@ -60,13 +49,13 @@ def plot_take(take, definitions=None, save=None):
         raw = np.mean([b["ports"][ch]["data"][sparam] for b in take["repeats"] if ch in b["ports"]],
                       axis=0)
         (line,) = axes[0, 0].plot(f, _db(raw), label=label)
-        axes[1, 0].plot(f, _deg(raw), color=line.get_color())
+        axes[1, 0].plot(f, np.rad2deg(np.angle(raw)), color=line.get_color())
         mine = [c for c in corr if c["channel"] == ch]
         if mine:
             g = np.mean([c["data"]["S11"] for c in mine], axis=0)
             fc = mine[0]["freq"] / 1e6
             axes[0, 1].plot(fc, _db(g), color=line.get_color(), label=label)
-            axes[1, 1].plot(fc, _deg(g), color=line.get_color())
+            axes[1, 1].plot(fc, np.rad2deg(np.angle(g)), color=line.get_color())
     axes[0, 0].set_title(f"raw {sparam} (standards not shown)", fontsize=10)
     axes[0, 0].set_ylabel(f"|{sparam}| raw (dB)")
     axes[1, 0].set_ylabel("phase (deg)")
@@ -93,12 +82,10 @@ def plot_take(take, definitions=None, save=None):
 
 def plot_check(result, serial="", save=None):
     """
-    A stuck or thru check (vna.stuck_check / thru_check). Top: raw |S21| of
-    every position, ALL_OPEN in grey. Bottom: stuck check, each position's
-    median |S21 - first ALL_OPEN| (grey ALL_OPEN bars should all be small,
-    coloured ones clearly bigger); thru check, each position's median |S21| in dB.
+    A stuck or thru check. Top: raw |S21| (dB) of every position, ALL_OPEN in grey.
+    Bottom, stuck check: each position's median |S21 - first ALL_OPEN| (linear, no unit;
+    grey ALL_OPEN bars should be small, blue ones clearly bigger). Thru check: median |S21| in dB.
     """
-    plt = _plt()
     rows = result["rows"]
     f = result["freq"] / 1e6
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
@@ -121,7 +108,7 @@ def plot_check(result, serial="", save=None):
         ax2.set_title(f"closed vs ALL_OPEN gap {result['gap_db']:.1f} dB", fontsize=10)
     else:
         heights = [r["diff"] for r in rows]
-        ax2.set_ylabel("median |S21 - first ALL_OPEN|")
+        ax2.set_ylabel("median |S21 - first ALL_OPEN| (linear)")
         ax2.set_title("Grey (ALL_OPEN) should all be small, blue all clearly bigger", fontsize=10)
     ax2.bar(range(len(rows)), heights, color=colours)
     ax2.set_xticks(range(len(rows)))
@@ -133,11 +120,7 @@ def plot_check(result, serial="", save=None):
 
 
 def plot_runs(runs, sparam=None, save=None):
-    """
-    Runs from db.load_runs: |S| in dB and phase. sparam None = S21 for a
-    2-port run, S11 (the corrected reflection) for a corrected run.
-    """
-    plt = _plt()
+    """Runs from db.load_runs: |S| in dB and phase. sparam None: S21 if there, else S11."""
     fig, (ax_m, ax_p) = plt.subplots(2, 1, sharex=True, figsize=(9, 6))
     for run_id, run in runs.items():
         s = sparam or ("S21" if "S21" in run["data"] else "S11")
@@ -146,16 +129,136 @@ def plot_runs(runs, sparam=None, save=None):
             continue
         meta = run["meta"]
         what = meta.get("port") or ""
-        label = f"run {run_id} {run['name']} {s}" + (f" ({what})" if what else "") + \
-            (f" {meta['temp_str']}" if meta.get("temp_str") else "")
+        label = (f"run {run_id} {run['name']} {s}" + (f" ({what})" if what else "")
+                 + (f" {meta['temp_str']}" if meta.get("temp_str") else ""))
         (line,) = ax_m.plot(run["freq"] / 1e6, _db(run["data"][s]), label=label)
-        ax_p.plot(run["freq"] / 1e6, _deg(run["data"][s]), color=line.get_color())
+        ax_p.plot(run["freq"] / 1e6, np.rad2deg(np.angle(run["data"][s])), color=line.get_color())
     ax_m.set_ylabel("|S| (dB)")
     ax_p.set_ylabel("phase (deg)")
     ax_p.set_xlabel("Frequency (MHz)")
     ax_m.legend(fontsize=8, frameon=False)
     for ax in (ax_m, ax_p):
         ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    _save(fig, save)
+    return fig
+
+
+def smith_grid(ax):
+    """A light Smith-chart grid: unit circle, a few r and x circles, open/short labels."""
+    t = np.linspace(0, 2 * np.pi, 400)
+    ax.plot(np.cos(t), np.sin(t), color="0.6", lw=1.0, zorder=1)
+    for r in (0.2, 0.5, 1, 2, 5):
+        c, rad = r / (1 + r), 1 / (1 + r)
+        ax.plot(c + rad * np.cos(t), rad * np.sin(t), color="0.88", lw=0.7, zorder=0)
+    for x in (0.2, 0.5, 1, 2, 5):
+        for sign in (1, -1):
+            z = 1j * sign * x + np.concatenate([np.linspace(0, 1, 200), np.linspace(1, 50, 400)])
+            g = (z - 1) / (z + 1)
+            ax.plot(g.real, g.imag, color="0.88", lw=0.7, zorder=0)
+    ax.plot([-1, 1], [0, 0], color="0.88", lw=0.7, zorder=0)
+    ax.plot(0, 0, "+", color="0.6", ms=7, zorder=1)
+    ax.text(1.04, 0, "open", fontsize=8, color="0.4", va="center")
+    ax.text(-1.04, 0, "short", fontsize=8, color="0.4", va="center", ha="right")
+    ax.set_xlim(-1.12, 1.12)
+    ax.set_ylim(-1.12, 1.12)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+
+def plot_mag_smith(traces, together=False, title=None, mark_hz=None, save=None):
+    """
+    Each trace (analysis.traces_from_*) as |S| in dB beside its Smith chart; together=True
+    puts them all on one figure. mark_hz marks a frequency. save: a folder, one
+    <label>.png per figure (never overwrites). Returns the figures.
+    The Smith chart only means something for a corrected reflection (raw |S21| through the
+    fridge is a dot near the centre).
+    """
+    if not traces:
+        print("No traces to plot")
+        return []
+    figs = []
+    for group in ([traces] if together else [[t] for t in traces]):
+        name = title or (group[0]["label"] if len(group) == 1 else f"{len(group)} traces")
+        fig, (am, asm) = plt.subplots(1, 2, figsize=(12, 4.8), gridspec_kw={"width_ratios": [1.5, 1]})
+        smith_grid(asm)
+        for tr in group:
+            f = tr["freq"] / 1e6
+            (line,) = am.plot(f, _db(tr["gamma"]), lw=1.0, label=tr["label"])
+            asm.plot(tr["gamma"].real, tr["gamma"].imag, lw=1.0, color=line.get_color())
+            asm.plot(tr["gamma"].real[0], tr["gamma"].imag[0], "o", ms=5, color=line.get_color())
+            if mark_hz is not None and f[0] <= mark_hz / 1e6 <= f[-1]:
+                j = int(np.argmin(np.abs(tr["freq"] - mark_hz)))
+                asm.plot(tr["gamma"].real[j], tr["gamma"].imag[j], "x", ms=9, mew=2, color="k")
+        if mark_hz is not None:
+            am.axvline(mark_hz / 1e6, color="k", ls="--", lw=0.8)
+        raw = all(tr["kind"] == "raw" for tr in group)
+        am.set_ylabel("|S| raw (dB)" if raw else "|reflection| (dB)")
+        am.set_xlabel("Frequency (MHz)")
+        am.grid(True, alpha=0.3)
+        am.ticklabel_format(axis="y", useOffset=False)
+        am.legend(fontsize=8, frameon=False)
+        asm.set_title("Smith chart (dot = first frequency)" + (" - raw, not a reflection" if raw else ""),
+                      fontsize=9)
+        fig.suptitle(name, fontsize=11)
+        fig.tight_layout()
+        if save:
+            safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name).strip("_")[:80]
+            _save(fig, Path(save) / f"{safe}.png")
+        figs.append(fig)
+    return figs
+
+
+def plot_temperatures(rows, save=None):
+    """MXP, MXP2 and STP just before (dot) and after (x) every position of a take or check
+    (analysis.temperature_log), log scale. Sensors with no readings are left out."""
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    steps = np.arange(1, len(rows) + 1)
+    plotted = False
+    for sensor in ("mxp", "mxp2", "stp"):
+        before = np.array([r.get(f"{sensor}_k_before") for r in rows], dtype=float)
+        after = np.array([r.get(f"{sensor}_k_after") for r in rows], dtype=float)
+        if np.all(np.isnan(before)) and np.all(np.isnan(after)):
+            continue
+        (line,) = ax.plot(steps, before, "o-", ms=4, lw=1, label=f"{sensor.upper()} before")
+        ax.plot(steps, after, "x", ms=6, color=line.get_color(), label=f"{sensor.upper()} after")
+        plotted = True
+    if not plotted:
+        ax.text(0.5, 0.5, "no fridge readings saved for these runs", transform=ax.transAxes,
+                ha="center")
+    else:
+        ax.set_yscale("log")
+        ax.legend(fontsize=8, ncol=3, frameon=False)
+    ax.set_xticks(steps)
+    ax.set_xticklabels([r["name"] for r in rows], rotation=60, ha="right", fontsize=7)
+    ax.set_ylabel("temperature (K)")
+    ax.grid(True, alpha=0.3, which="both")
+    ax.set_title(f"Fridge temperatures, {rows[0].get('what', '')}", fontsize=10)
+    fig.tight_layout()
+    _save(fig, save)
+    return fig
+
+
+def plot_hv_test(result, positions, save=None):
+    """
+    A gate test (vna.hv_test) after ecal.hv_positions. Top: unwrapped phase of each closed
+    position, corrected to the internal standards (slope = how far out it reflects; flat =
+    at the internal standards, like ALL_OPEN). Bottom: |G| (dB). One colour per position.
+    """
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    for step, v in positions.items():
+        f = v["freq"] / 1e6
+        ph = np.degrees(np.unwrap(np.angle(v["inside"])))
+        ph -= 360 * np.round(ph[0] / 360)
+        lab = f"{step}: {v['label']}  ({v['delay_in_ns'] / 2:+.3f} ns one way)"
+        ax1.plot(f, ph, lw=1.5, label=lab)
+        ax2.plot(f, _db(v["inside"]), lw=1.2)
+    ax1.set_ylabel("phase, corrected to the internal standards (deg)")
+    ax1.set_title(f"Gate test {result['check_id']}: flat = reflects at the internal standards; "
+                  "steeper down = further out", fontsize=10)
+    ax1.legend(fontsize=7, ncol=1)
+    ax2.set_ylabel("|G| (dB)")
+    ax2.set_xlabel("Frequency (MHz)")
     fig.tight_layout()
     _save(fig, save)
     return fig

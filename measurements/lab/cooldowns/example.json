@@ -17,9 +17,7 @@
   "sweep": {
     "start_hz": 510000000,
     "stop_hz": 610000000,
-    "points": 2001,
-    "if_bandwidth_hz": 1000,
-    "power_dbm": -20
+    "if_bandwidth_hz": 1000
   },
   "repeats": 1,
   "correct_sparam": "S21",
